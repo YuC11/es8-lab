@@ -85,7 +85,7 @@ public class M62SearchAfter implements LevelModule {
 
         return LevelResult.builder("要第 10 页（第 " + (900 + 1) + "–" + (900 + SIZE) + " 条）：from+size 一次 "
                         + String.format(Locale.ROOT, "%.0f", aMs) + "ms；search_after 翻 " + PAGES + " 页共 "
-                        + got + " 条只用 " + String.format(Locale.ROOT, "%.0f", bMs) + "ms，且每页代价恒定")
+                        + got + " 条只用 " + String.format(Locale.ROOT, "%.0f", bMs) + "ms；这次运行只记录了总耗时，不能据此断言每页代价恒定")
                 .metrics(
                         new Metric("from+size 跳页", String.format(Locale.ROOT, "%.0f", aMs) + " ms",
                                 "from=900 size=" + SIZE),
@@ -103,7 +103,7 @@ public class M62SearchAfter implements LevelModule {
                         "search_after 的前提是**稳定且唯一的排序**：本关用 price + _shard_doc（PIT 内的隐藏递增字段），保证不重不漏。",
                         "如果只用 price 排序，价格相同的文档顺序不稳定，翻页会出现重复或漏数据——这是最常见的实现错误。",
                         "PIT 有生命周期（keep_alive），不用时必须显式关闭，否则会持有段引用、阻碍 merge 与删除。",
-                        "search_after 不能跳页（只能顺序翻），这是它换取恒定代价的代价；产品上\"跳到第 N 页\"的需求要么放弃，要么用采样估算。")
+                        "search_after 不能跳页（只能顺序翻）。要证明逐页成本是否稳定，需要记录多个页深的逐页耗时；本关不把单次总耗时外推成该结论。")
                 .build();
     }
 

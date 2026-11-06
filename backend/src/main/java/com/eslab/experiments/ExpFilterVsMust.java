@@ -51,8 +51,10 @@ public class ExpFilterVsMust implements ExperimentModule {
     @Override
     public ExperimentResult run() throws Exception {
         JsonNode before = es.get("/_nodes/stats/indices/request_cache");
-        Timing.Sample a = Timing.sample(5, 1, round -> byMust());
-        Timing.Sample b = Timing.sample(5, 1, round -> byFilter());
+        // 两侧同口径：5 轮正式样本 + 1 轮预热，A/B 交替执行
+        Timing.Pair pair = Timing.pair(5, 1, round -> byMust(), round -> byFilter());
+        Timing.Sample a = pair.a();
+        Timing.Sample b = pair.b();
         JsonNode after = es.get("/_nodes/stats/indices/request_cache");
 
         Iterator<String> nodeIds = before.path("nodes").fieldNames();

@@ -36,6 +36,39 @@ public final class Timing {
         return sample(rounds, 1, task);
     }
 
+    /** A/B 两组的采样结果，附带本轮使用的口径，便于页面标注 */
+    public record Pair(Sample a, Sample b, int rounds, int warmup) {
+        public String scope() {
+            return "每侧 " + rounds + " 轮 + " + warmup + " 轮预热，A/B 交替执行";
+        }
+    }
+
+    /**
+     * A/B 交替采样。
+     *
+     * 先各自预热 warmup 轮（把缓存、连接、JIT 预热掉），再交替取正式样本：
+     * 奇数轮先跑 A，偶数轮先跑 B。这样两组经历的环境顺序基本对称，
+     * 可以抵消「第二组总是更热」这一类系统性漂移 —— 分开跑 A 全集再跑 B 全集做不到这一点。
+     */
+    public static Pair pair(int rounds, int warmup, RoundTask a, RoundTask b) throws Exception {
+        for (int i = 0; i < warmup; i++) {
+            a.run(-1 - i);
+            b.run(-1 - i);
+        }
+        List<Double> ra = new ArrayList<>(rounds);
+        List<Double> rb = new ArrayList<>(rounds);
+        for (int i = 0; i < rounds; i++) {
+            if (i % 2 == 0) {
+                ra.add(a.run(i));
+                rb.add(b.run(i));
+            } else {
+                rb.add(b.run(i));
+                ra.add(a.run(i));
+            }
+        }
+        return new Pair(summarize(ra), summarize(rb), rounds, warmup);
+    }
+
     public static Sample summarize(List<Double> raw) {
         List<Double> sorted = new ArrayList<>(raw);
         Collections.sort(sorted);

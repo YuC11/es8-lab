@@ -620,6 +620,62 @@ export const LEVEL_CALLS: Record<string, CallSpec[]> = {
     { method: 'PUT', path: '/eslab-goods-ingest/_doc/INGEST-1?pipeline=eslab-goods-enrich&refresh=true', note: '带 pipeline 写入：改名、算税价、删内部字段', body: { old_sku: 'SKU-INGEST-1', title: '  蓝牙   耳机  主动降噪 ', price: 899, internal_note: '内部备注' } },
     { method: 'GET', path: '/eslab-goods-ingest/_doc/INGEST-1', note: '读回来看处理结果：price_with_tax=1015.87' },
   ],
+  // ── M1–M6 核心操作小关卡（独立 eslab-goods-core，每关先重建 30 条样例）──
+  'm1-5': [
+    { method: 'PUT', path: '/eslab-goods-core/_doc/core-crud', note: '固定 ID 创建：_version=1，4 个字段', body: { sku: 'CORE-CRUD', title: '蓝牙耳机 CRUD 样例', stock: 1, price: 199 } },
+    { method: 'POST', path: '/eslab-goods-core/_update/core-crud', note: '局部更新 stock：合并语义，其余字段保留', body: { doc: { stock: 2 } } },
+    { method: 'GET', path: '/eslab-goods-core/_doc/core-crud', note: '读回 _source 与 _version' },
+    { method: 'PUT', path: '/eslab-goods-core/_doc/core-crud?refresh=true', note: '整条覆盖：只带 stock，其余字段全丢', body: { stock: 3 } },
+    { method: 'DELETE', path: '/eslab-goods-core/_doc/core-crud', note: '删除后 GET 得到 404' },
+  ],
+  'm1-6': [
+    { method: 'GET', path: '/eslab-goods-core/_mapping', note: '字段类型与 analyzer' },
+    { method: 'GET', path: '/eslab-goods-core/_settings', note: '分片数 / 副本数' },
+    { method: 'POST', path: '/eslab-goods-core/_field_caps', note: '类型 / 可搜索 / 可聚合', body: { fields: ['title', 'price', 'sku', 'brand'] } },
+    { method: 'POST', path: '/eslab-products-v2/_field_caps', note: '同一字段在 v2 里的能力（对照）', body: { fields: ['title', 'price'] } },
+  ],
+  'm2-3': [
+    { method: 'POST', path: '/eslab-goods-core/_analyze', note: '按 title 的 ik_max_word 切词', body: { field: 'title', text: '蓝牙耳机 主动降噪' } },
+    { method: 'POST', path: '/_analyze', note: '同一串用 standard 对照', body: { analyzer: 'standard', text: '蓝牙耳机 主动降噪' } },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'match 命中', body: { size: 0, query: { match: { title: '蓝牙耳机 主动降噪' } } } },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'term 打单字「蓝」：0 命中', body: { size: 0, query: { term: { title: '蓝' } } } },
+  ],
+  'm3-4': [
+    { method: 'POST', path: '/_bulk', note: 'NDJSON：create 冲突（409）+ index 成功（201），整体仍 200、errors=true' },
+    { method: 'POST', path: '/_bulk', note: '把 create 换成 index 重放：errors=false', cond: '重放' },
+    { method: 'GET', path: '/eslab-goods-core/_count', note: '最终文档数 31' },
+  ],
+  'm4-7': [
+    { method: 'POST', path: '/eslab-goods-core/_search', note: '_source 裁到 2 个字段', body: { size: 1, _source: ['sku', 'title'], query: { match_all: {} } } },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'docvalue_fields 取 3 个字段', body: { size: 1, _source: false, docvalue_fields: ['sku', 'price', 'created_at'], query: { match_all: {} } } },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'stored_fields：mapping 未 store，返回空', body: { size: 1, stored_fields: ['sku', 'title'], query: { match_all: {} } } },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: '对 text 要 docvalue：400', body: { size: 1, _source: false, docvalue_fields: ['title'], query: { match_all: {} } } },
+  ],
+  'm4-8': [
+    { method: 'POST', path: '/_msearch', note: 'NDJSON：第 1 条正常、第 2 条对 text 排序报错，整体 200' },
+    { method: 'POST', path: '/eslab-goods-core/_mget', note: '三条 id，含一条不存在的', body: { ids: ['core-0', 'core-1', 'missing'] } },
+  ],
+  'm5-4': [
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'filter+stats / range / cardinality / terms', body: { size: 0, aggs: { in_stock: { filter: { range: { stock: { gt: 20 } } }, aggs: { price_stats: { stats: { field: 'price' } } } } } } },
+  ],
+  'm5-5': [
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'composite size=2 第 1 页', body: { size: 0, aggs: { all: { composite: { size: 2, sources: [{ brand: { terms: { field: 'brand' } } }] } } } } },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: '带 after_key 取下一页，直到游标消失', repeat: '× 4 页' },
+    { method: 'POST', path: '/eslab-goods-core/_search', note: 'terms(size=50) 取精确桶数对照', body: { size: 0, aggs: { all: { terms: { field: 'brand', size: 50 } } } } },
+  ],
+  'm6-4': [
+    { method: 'POST', path: '/eslab-goods-core/_search?scroll=1m', note: '打开 scroll 上下文，size=10', body: { size: 10, sort: ['_doc'], query: { match_all: {} } } },
+    { method: 'POST', path: '/_search/scroll', note: '用 _scroll_id 取下一批', repeat: '× 3 批' },
+    { method: 'DELETE', path: '/_search/scroll', note: '关闭上下文' },
+    { method: 'POST', path: '/eslab-goods-core/_pit?keep_alive=1m', note: '打开 PIT 快照' },
+    { method: 'POST', path: '/_search', note: 'PIT + search_after 翻页（sort=price,_shard_doc）', repeat: '× 3 页' },
+    { method: 'DELETE', path: '/_pit', note: '关闭 PIT' },
+  ],
+  'm6-5': [
+    { method: 'POST', path: '/eslab-goods-core/_search', note: '取 match 的最高分文档', body: { size: 1, query: { match: { title: '蓝牙耳机' } } } },
+    { method: 'POST', path: '/eslab-goods-core/_explain/core-0', note: '重放同一 query，分数应一致', body: { query: { match: { title: '蓝牙耳机' } } } },
+    { method: 'POST', path: '/eslab-goods-core/_explain/core-0', note: '换成 term：matched=false', body: { query: { term: { title: '蓝牙耳机' } } } },
+  ],
 };
 
 export function callsOf(levelId: string): CallSpec[] {

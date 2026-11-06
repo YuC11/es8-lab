@@ -41,6 +41,12 @@ public class LabData {
     public static final String V6 = "eslab-goods-v6";
     public static final String SEARCH = "eslab-goods-search";
     public static final String OPS = "eslab-goods-ops";
+    /** M1-M6 核心操作小关卡的独立、可随时复位的数据集。 */
+    public static final String CORE = "eslab-goods-core";
+
+    /** 受控分片实验：同一份 mapping 与数据，只差主分片数。 */
+    public static final String SHARD1 = "eslab-goods-shard1";
+    public static final String SHARD3 = "eslab-goods-shard3";
 
     public static final String LIVE_ALIAS = "eslab-goods-live";
     public static final String LIVE_1 = "eslab-goods-live-000001";
@@ -132,6 +138,60 @@ public class LabData {
         props.put("version", Json.map("type", "integer"));
         mappings.put("dynamic", true);
         obj(def.get("settings")).put("number_of_shards", 1);
+        return def;
+    }
+
+    /** 小关卡只需少量稳定样例；不修改课程主索引 v1/v2。 */
+    public Map<String, Object> coreDefinition() {
+        return Json.map(
+                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0),
+                "mappings", Json.map("dynamic", "strict", "properties", Json.map(
+                        "sku", Json.map("type", "keyword"),
+                        "title", Json.map("type", "text", "analyzer", "ik_max_word",
+                                "fields", Json.map("keyword", Json.map("type", "keyword"))),
+                        "category", Json.map("type", "keyword"),
+                        "brand", Json.map("type", "keyword"),
+                        "price", Json.map("type", "scaled_float", "scaling_factor", 100),
+                        "stock", Json.map("type", "integer"),
+                        "created_at", Json.map("type", "date"))));
+    }
+
+    /**
+     * 30 条确定性样例，6 个品牌 × 4 个类目 × 价格 99 起每档 +10。
+     *
+     * 几个小关卡对「基数」有硬要求：composite 分页（m5-5）要能翻到第 2、3 页，
+     * cardinality（m5-4）要有可区分的去重结果。品牌只有 2 个时这两关都会退化成一页，
+     * 所以这里刻意留出 6 个品牌、4 个类目 —— 数据量小，但分布能支撑桶遍历。
+     */
+    public Ensure resetCore() {
+        recreate(CORE, coreDefinition());
+        String[] brands = {"拾光", "云声", "北极星", "木言", "星河", "松果"};
+        String[] categories = {"数码影音", "电脑办公", "家居", "运动"};
+        List<String> ids = new ArrayList<>();
+        List<Map<String, Object>> docs = new ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            ids.add("core-" + i);
+            docs.add(Json.map("sku", "CORE-" + i,
+                    "title", i % 2 == 0 ? "蓝牙耳机 核心样例 " + i : "机械键盘 核心样例 " + i,
+                    "category", categories[i % categories.length],
+                    "brand", brands[i % brands.length],
+                    "price", 99.0 + i * 10,
+                    "stock", 10 + i,
+                    "created_at", "2026-01-" + String.format("%02d", (i % 28) + 1)));
+        }
+        bulkWithIds(CORE, ids, docs);
+        refresh(CORE);
+        return new Ensure(CORE, count(CORE), true, docs.size());
+    }
+
+    /**
+     * 受控分片实验的索引定义：与 v2 完全同构（同 mapping、同 analyzer、同 doc_values），
+     * 只把主分片数换成指定值。m7-1 用它把「分片数」这一个变量单独拎出来。
+     */
+    public Map<String, Object> shardLabDefinition(int shards) {
+        Map<String, Object> def = copy(dataset.v2Definition());
+        obj(def.get("settings")).put("number_of_shards", shards);
+        obj(def.get("settings")).put("number_of_replicas", 0);
         return def;
     }
 

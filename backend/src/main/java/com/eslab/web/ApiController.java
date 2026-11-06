@@ -248,7 +248,10 @@ public class ApiController {
             // 刻意不放行 /_forcemerge 与 /_rollover 的全局路径 —— 索引级
             // /eslab-xxx/_forcemerge 已经被 /eslab- 前缀覆盖，加全局前缀会让控制台能合并所有索引。
             "/_reindex", "/_tasks/", "/_aliases", "/_alias",
-            "/_index_template", "/_ingest/pipeline");
+            "/_index_template", "/_ingest/pipeline",
+            // M1-M6 小关卡：多请求读取。/_search/scroll 由 /_search 前缀覆盖，
+            // 只有 /_msearch 是独立入口（NDJSON body，不是普通 JSON）。
+            "/_msearch");
 
     private static String checkAllowed(String method, String path) {
         if (!path.startsWith("/")) return "path 必须以 / 开头";
@@ -261,7 +264,9 @@ public class ApiController {
         if ("DELETE".equals(method)) {
             if (path.matches("^/eslab-[a-zA-Z0-9._-]+$")) return null;
             if ("/_pit".equals(path)) return null;
-            return "DELETE 仅允许删除单个 eslab-* 索引或关闭 PIT";
+            // 关闭 scroll 上下文也是 DELETE，但它是全局路径、不涉及索引数据 —— 只放这一条。
+            if ("/_search/scroll".equals(path)) return null;
+            return "DELETE 仅允许删除单个 eslab-* 索引、关闭 PIT 或关闭 scroll 上下文";
         }
         if ("/".equals(path)) return null;
         for (String p : ALLOWED_PREFIXES) {

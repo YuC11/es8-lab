@@ -54,12 +54,13 @@ public class M63Profile implements LevelModule {
                 "sort", Json.list(Json.map("price", "asc"))));
         // @focus-end
 
-        // 汇总各分片、各阶段的耗时（profile 结构是嵌套数组，这里拍平成「按类型累计」）
+        // 只读取 profile 树用于定位，不将父子节点耗时相加：父节点的耗时包含子节点，
+        // 求和会重复计数，也不能把 profile 时间当作请求墙钟耗时。
         Map<String, Long> totals = new LinkedHashMap<>();
         JsonNode shards = profiled.path("profile").path("shards");
         for (JsonNode shard : shards) {
             for (JsonNode search : shard.path("searches")) {
-                for (JsonNode q : search.path("query")) walkProfile(q, totals);
+                for (JsonNode q : search.path("query")) collectProfileRoots(q, totals);
                 if (search.hasNonNull("rewrite_time") && search.path("rewrite_time").asLong() != 0) {
                     totals.merge("rewrite", search.path("rewrite_time").asLong(), Long::sum);
                 }
@@ -120,13 +121,12 @@ public class M63Profile implements LevelModule {
                 .build();
     }
 
-    /** profile 树是递归结构：按节点类型累计 time_in_nanos */
-    private static void walkProfile(JsonNode node, Map<String, Long> totals) {
-        if (node == null || node.isNull() || node.isMissingNode()) return;
-        String type = node.path("type").asText("other");
-        long ns = node.path("time_in_nanos").asLong(0);
-        totals.merge(type, ns, Long::sum);
-        for (JsonNode child : node.path("children")) walkProfile(child, totals);
+    private void collectProfileRoots(JsonNode node, Map<String, Long> totals) {
+        if (!node.isObject()) return;
+        String type = node.path("type").asText("unknown");
+        long time = node.path("time_in_nanos").asLong();
+        totals.merge(type, time, Long::sum);
+        // 不递归累加 children；children 留在原始 profile 响应供读者逐层检查。
     }
 
     private record Phase(String type, double ms) {

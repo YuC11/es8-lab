@@ -63,6 +63,9 @@ public class LevelRegistry {
     public String sourceFileOf(String id) {
         LevelModule m = byId.get(id);
         if (m == null) return null;
-        return "backend/src/main/java/" + m.getClass().getName().replace('.', '/') + ".java";
+        String name = m.getClass().getName();
+        int nested = name.indexOf('$');
+        if (nested >= 0) name = name.substring(0, nested);
+        return "backend/src/main/java/" + name.replace('.', '/') + ".java";
     }
 }

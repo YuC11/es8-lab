@@ -52,8 +52,10 @@ public class ExpV1VsV2 implements ExperimentModule {
         long h1 = hitCount(V1);
         long h2 = hitCount(V2);
 
-        Timing.Sample a = Timing.sample(5, 1, round -> run(V1));
-        Timing.Sample b = Timing.sample(5, 1, round -> run(V2));
+        // 两侧同口径：5 轮正式样本 + 1 轮预热，A/B 交替执行
+        Timing.Pair pair = Timing.pair(5, 1, round -> run(V1), round -> run(V2));
+        Timing.Sample a = pair.a();
+        Timing.Sample b = pair.b();
         Timing.Compare cmp = Timing.compare(a, b);
 
         String conclusion = "耗时 " + num(a.median()) + "ms → " + num(b.median()) + "ms（"

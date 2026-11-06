@@ -1,7 +1,7 @@
 # es-lab — Elasticsearch 学习实验室
 
 从一个**空集群**开始，亲手建索引、写文档、灌数据，一路学到分片规划。
-电商商品搜索场景（20 万 SKU），12 章 44 关 + 4 个 A/B 实验 + 136 条可执行的变体实验。
+电商商品搜索场景（20 万 SKU），12 章 54 关 + 4 个 A/B 实验 + 166 条可执行的变体实验。
 
 不是考试平台：没有选择题、不判分。每关末尾的「变体实验」是 3 条能一键执行的真实请求 —— 改个参数，看 ES 真实返回；「后端实现」抽屉显示对应的 Java 源码，并高亮刚执行的那几行。
 
@@ -69,7 +69,7 @@ sh sh/build.sh
 ```bash
 sh sh/backend.sh          # → http://127.0.0.1:8787
 curl -s --noproxy '*' http://127.0.0.1:8787/api/health
-# 期望 "cluster": { "up": true }，"levels" 44 项，"experiments" 4 项
+# 期望 "cluster": { "up": true }，"levels" 54 项，"experiments" 4 项
 ```
 
 ### 第 4 步：打开页面，从第 0 章开始
@@ -120,7 +120,7 @@ es-lab/
 ├── backend/     Spring Boot 后端——唯一与 ES 通信的进程
 │   └── src/main/java/com/eslab/
 │       ├── data/        数据集定义与写入（DatasetService / JobRegistry）
-│       ├── levels/      44 关，一关一类；support/LabData 管第 8-11 章实验索引
+│       ├── levels/      54 关，一关一类（M1-M6 的十个操作型小关卡在 CoreLevels）；support/LabData 管全部实验索引
 │       ├── experiments/ 4 个 A/B 实验
 │       └── seed/        确定性数据生成 + 命令行快进
 ├── front/       React 前端——纯静态产物（dist/ 由 8787 托管）
@@ -139,13 +139,13 @@ es-lab/
 | 章 | 主题 | 关 |
 |---|---|---|
 | M0 | **从零建库**（体检 → 建索引 → 写文档 → bulk 2 万） | 4 |
-| M1 | 索引与 Mapping（动态映射、显式设计、字段爆炸） | 4 |
-| M2 | 分词与分析器（standard / ik_smart / ik_max_word） | 2 |
-| M3 | 写入路径（bulk、_id 策略、近实时） | 3 |
-| M4 | **查询 DSL**（请求体骨架 → 逐变量递进 → 叶子查询边界 → bool → 子句参数 → 算分成本） | 6 |
-| M5 | 聚合与排序（terms 误差、嵌套聚合、.keyword） | 3 |
-| M6 | 分页与性能诊断（深分页、search_after + PIT、profile） | 3 |
-| M7 | 索引设计与优化实战（分片规划、A/B 实验台） | 2 |
+| M1 | 索引与 Mapping（动态映射、显式设计、字段爆炸、CRUD 与元数据巡检） | 6 |
+| M2 | 分词与分析器（standard / ik_smart / ik_max_word、_analyze 调试） | 3 |
+| M3 | 写入路径（bulk、_id 策略、近实时、逐项失败与重放） | 4 |
+| M4 | **查询 DSL**（请求体骨架 → 逐变量递进 → 叶子查询边界 → bool → 子句参数 → 算分成本 → 字段裁剪 / 多请求读取） | 8 |
+| M5 | 聚合与排序（terms 误差、嵌套聚合、.keyword、指标聚合与桶遍历） | 5 |
+| M6 | 分页与性能诊断（深分页、search_after + PIT、profile、scroll、explain） | 5 |
+| M7 | 索引设计与优化实战（受控分片实验、统一口径的 A/B 实验台） | 2 |
 | M8 | **索引变更与零停机**（别名、reindex、_tasks 进度、forcemerge/rollover） | 4 |
 | M9 | **相关性工程**（multi_match、短语、function_score、高亮折叠、补全、同义词） | 6 |
 | M10 | **增量写入与并发**（_update、_seq_no 409、bulk 混合动作、按条件删改） | 4 |

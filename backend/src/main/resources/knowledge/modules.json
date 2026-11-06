@@ -1110,7 +1110,7 @@
             }
           ],
           "takeaway": "字段爆炸是动态映射的隐性账单，dynamic:strict 是唯一能在写入时拦住它的开关",
-          "next": "m2-1",
+          "next": "m1-5",
           "prereq": {
             "cluster": true,
             "indices": [
@@ -1120,6 +1120,289 @@
               }
             ],
             "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+          }
+        },
+        {
+          "id": "m1-5",
+          "title": "文档 CRUD：覆盖、合并与删除",
+          "objective": "同一条文档走完创建 → 局部更新 → 整体覆盖 → 删除，分清 PUT 与 _update 的语义差别",
+          "hook": "很多人以为 PUT 与 _update 的区别是「谁更快」。真正的区别是：一个替换整条文档，一个只改你给的那几个字段。",
+          "predict": "先写下你的判断：先 PUT 写入 4 个字段，再用 PUT 只写 stock，文档里还剩几个字段？",
+          "brief": "本关用固定 ID core-crud 走完整生命周期：PUT 创建（_version=1）→ _update 合并 stock（_version=2）→ PUT 只带 stock（整条被替换，_source 从 4 个字段掉到 1 个）→ DELETE 后再 GET 得到 404。每一步都记录 result、_version 与 _source 字段数。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`index`（HTTP 就是 `PUT /{index}/_doc/{id}`）的语义是**替换**：ES 用你这次给的 body 作为这条文档的新 `_source`，没提到的字段就没了。`_update` 的语义是**合并**：它先取出现有文档，把 `doc` 里的字段盖上去，再写回。"
+            },
+            {
+              "type": "p",
+              "text": "两者在响应里都表现为 `result` 变化、`_version` 递增，所以光看「写成功了」分不出区别 —— 必须读回 `_source` 看字段数。本关实测：`_update` 之后仍是 4 个字段，PUT 覆盖之后只剩 1 个。"
+            },
+            {
+              "type": "h",
+              "text": "为什么删除不是「打个标记」"
+            },
+            {
+              "type": "p",
+              "text": "`DELETE /{index}/_doc/{id}` 返回 `result=deleted`，之后再 `GET` 就是 404。段里那条被删的文档只是被标了删除位，空间要等段合并才回收 —— 但**接口层面**它就是不存在了，不存在「软删除」这回事。要留历史只能自己建版本字段或写另一条索引。"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "操作",
+                "result",
+                "_version",
+                "_source 字段数"
+              ],
+              "rows": [
+                [
+                  "PUT 创建（4 字段）",
+                  "created",
+                  "1",
+                  "4"
+                ],
+                [
+                  "POST _update doc.stock",
+                  "updated",
+                  "2",
+                  "4"
+                ],
+                [
+                  "PUT 只带 stock",
+                  "updated",
+                  "3",
+                  "1"
+                ],
+                [
+                  "DELETE",
+                  "deleted",
+                  "4",
+                  "—"
+                ],
+                [
+                  "DELETE 后 GET",
+                  "404",
+                  "—",
+                  "—"
+                ]
+              ]
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "text": "整条覆盖是生产事故的常见来源：上游只推了变化的字段，用 index 写回，其余字段全丢。要么改用 `_update`，要么保证推送的是完整文档。"
+            },
+            {
+              "type": "h",
+              "text": "想只改一个字段，怎么写"
+            },
+            {
+              "type": "code",
+              "lang": "json",
+              "text": "POST /eslab-goods-core/_update/core-crud\n{ \"doc\": { \"stock\": 2 } }"
+            },
+            {
+              "type": "p",
+              "text": "这就是 upsert 之前最常用的写法。注意 `_update` 内部是「读-改-写」，高并发下会撞版本冲突，处理方式在 m10-2。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "重建 core 样例，对 core-crud 依次执行创建、合并、覆盖、删除，并记录每一步的 _version 与字段数",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 `doc.stock` 换成整条 body 再 PUT 一次，观察其它字段是否消失",
+              "kind": "console",
+              "method": "PUT",
+              "path": "/eslab-goods-core/_doc/core-crud?refresh=true",
+              "body": {
+                "stock": 9
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "读一条固定样例文档",
+              "method": "GET",
+              "path": "/eslab-goods-core/_doc/core-1",
+              "watch": "found 是 true 还是 false，_source 里有哪些字段",
+              "expect": "found=true，_source 有 sku/title/category/brand/price/stock/created_at 七个字段 —— 这是 resetCore 写入的完整形态"
+            },
+            {
+              "task": "用 op_type=create 再写一次同 ID",
+              "method": "POST",
+              "path": "/eslab-goods-core/_doc/core-1?op_type=create",
+              "watch": "HTTP 状态码与 error.type",
+              "expect": "409 version_conflict_engine_exception。create 的语义是「不存在才写」，重复就是冲突 —— 这正是可安全重放的写入方式",
+              "body": {
+                "sku": "DUP"
+              }
+            },
+            {
+              "task": "对 text 字段排序，看它为什么被拒",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "HTTP 状态与 error.reason 的前半句",
+              "expect": "400 illegal_argument_exception：Fielddata is disabled on [title]。text 字段没有 doc_values，排序/聚合要用 .keyword 子字段",
+              "body": {
+                "size": 0,
+                "sort": [
+                  {
+                    "title": "asc"
+                  }
+                ]
+              }
+            }
+          ],
+          "pitfall": "把 index 当 update 用。index 会替换整条 _source，`_version` 照样递增，看起来「成功了」，直到发现别的字段没了。",
+          "takeaway": "创建/替换用 PUT，局部改用 _update；两者都以 _version 递增收尾，判断语义要看 _source 而不是 result。",
+          "next": "m1-6",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
+          }
+        },
+        {
+          "id": "m1-6",
+          "title": "mapping / settings / field_caps 现场巡检",
+          "objective": "分清「字段怎么被索引」「索引怎么组织」「字段能做什么」三份事实，并会跨索引对比同一字段",
+          "hook": "排查线上问题最费时间的不是查不到，而是三份元数据各说各话：mapping 说它是 text，field_caps 说它不可聚合，聚合请求报 400。",
+          "predict": "先猜：core 的 title 字段在 field_caps 里，searchable 与 aggregatable 分别是 true 还是 false？",
+          "brief": "对 eslab-goods-core 依次读 _mapping、_settings、_field_caps，再把 v2 的同名字段拉出来对照。三个接口回答三个不同问题，页面把三份结果并排放。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`GET /{index}/_mapping` 回答「每个字段被怎么索引」：类型、analyzer、是否有 `.keyword` 子字段、`doc_values` 开没开。这是设计的**意图**。"
+            },
+            {
+              "type": "p",
+              "text": "`GET /{index}/_settings` 回答「索引本身怎么组织」：分片数、副本数、refresh_interval、创建时间。分片数建完全局不可改，其余可以随时改 —— 这就是 m0-2 那个 `illegal_argument_exception` 的另一面。"
+            },
+            {
+              "type": "p",
+              "text": "`POST /{index}/_field_caps` 回答「这个字段能做什么」：能不能搜、能不能聚合、是什么类型。它是前两者推导出的**能力视图**，也是排查「为什么聚合报错」最快的一步。"
+            },
+            {
+              "type": "h",
+              "text": "三份事实会不一致"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "问题",
+                "接口",
+                "什么时候用它"
+              ],
+              "rows": [
+                [
+                  "字段是什么类型",
+                  "_mapping",
+                  "设计 Mapping、排查类型不匹配"
+                ],
+                [
+                  "索引几个分片",
+                  "_settings",
+                  "容量规划、为什么是 yellow"
+                ],
+                [
+                  "能不能排序/聚合",
+                  "_field_caps",
+                  "聚合或排序报 400 时第一站"
+                ]
+              ]
+            },
+            {
+              "type": "figure",
+              "kind": "inverted-index",
+              "caption": "mapping 决定字段进不进倒排与列存；field_caps 是把这份决定翻译成「能做什么」"
+            },
+            {
+              "type": "p",
+              "text": "本关实测：core 有 7 个显式字段、1 个分片 0 副本；v2 的 `title` 是 text、`price` 是 scaled_float —— 同一门课里两份索引对同名字段的定义并不相同，跨索引写查询时必须分别确认。"
+            },
+            {
+              "type": "callout",
+              "tone": "info",
+              "text": "`scaled_float` 是「按整数存、对外按小数显示」的类型：`price: 199.99` 实际存 19999，取回时除以 scaling_factor。它比 float 省空间，也不会有浮点尾数问题。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "读 core 的 mapping / settings / field_caps，并与 v2 的同名字段对照",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 fields 换成 title 再查一次 field_caps，看 text 与 keyword 的能力差",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_field_caps",
+              "body": {
+                "fields": [
+                  "title",
+                  "title.keyword"
+                ]
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "读 core 的字段能力表",
+              "method": "POST",
+              "path": "/eslab-goods-core/_field_caps",
+              "watch": "每个字段的 type / searchable / aggregatable",
+              "expect": "title 是 text、searchable=true、aggregatable=false；title.keyword 与 brand 是 keyword、两者都 true；price 是 scaled_float、可聚合不可分词",
+              "body": {
+                "fields": [
+                  "title",
+                  "title.keyword",
+                  "price",
+                  "brand"
+                ]
+              }
+            },
+            {
+              "task": "读索引设置",
+              "method": "GET",
+              "path": "/eslab-goods-core/_settings",
+              "watch": "number_of_shards 与 number_of_replicas 各是几",
+              "expect": "1 个分片、0 个副本。副本数随时可改，分片数不能 —— 想改只能重建（m8-2）"
+            },
+            {
+              "task": "对 text 字段做 terms 聚合",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "HTTP 状态与 error.reason",
+              "expect": "400：Fielddata is disabled on [title]。mapping 里 title 没有 doc_values，聚合要用 title.keyword",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "g": {
+                    "terms": {
+                      "field": "title"
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "pitfall": "只看 _mapping 就断定「这个字段能聚合」。mapping 里的 `index: false`、`doc_values: false` 都会让它可搜不可聚，必须用 _field_caps 验证。",
+          "takeaway": "mapping 是设计意图、settings 是资源形态、field_caps 是能力结论；排查顺序是从能力（报错）回到设计（mapping）。",
+          "next": "m2-1",
+          "prereq": {
+            "cluster": true,
+            "indices": [
+              {
+                "index": "eslab-products-v2",
+                "minDocs": 20000
+              }
+            ],
+            "text": "需要 v2 已建成（m1-2），core 由本关自建；对照 v2 的字段类型用"
           }
         }
       ]
@@ -1409,7 +1692,7 @@
             }
           ],
           "takeaway": "analyzer 与 search_analyzer 不一致是可设计的（扩大召回），但配错方向会静默丢结果",
-          "next": "m3-1",
+          "next": "m2-3",
           "prereq": {
             "cluster": true,
             "indices": [
@@ -1419,6 +1702,135 @@
               }
             ],
             "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+          }
+        },
+        {
+          "id": "m2-3",
+          "title": "用 _analyze 定位「为什么查不到」",
+          "objective": "把「搜不到」拆成 token 问题而不是 query 问题：先用 _analyze 对齐索引期与查询期的切词结果",
+          "hook": "商品就在库里、标题里也有这个词，`match` 却返回 0 条。九成情况不是查询写错了，是两侧切出来的 token 对不上。",
+          "predict": "先猜：同一串「蓝牙耳机 主动降噪」，ik_max_word 与 standard 分别切出几个 token？",
+          "brief": "对同一串文本跑两条 _analyze：一条按字段（走 title 的 ik_max_word），一条显式指定 standard。把 token、position、offset 三列并排放，再用 term 打同一个字段看命中。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`_analyze` 是分词器的显微镜：给它一段文本，它返回 token 列表、每个 token 的位置（position）与字符区间（start_offset / end_offset）。**索引期**写进去的是这些 token，**查询期**用来匹配的也是这些 token —— 只要两侧不一致，就一定查不到。"
+            },
+            {
+              "type": "h",
+              "text": "同一串，两个分词器"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "分析器",
+                "token 数",
+                "切出来的样子"
+              ],
+              "rows": [
+                [
+                  "ik_max_word（title 字段）",
+                  "4",
+                  "蓝牙 / 耳机 / 主动 / 降噪"
+                ],
+                [
+                  "standard",
+                  "8",
+                  "蓝 / 牙 / 耳 / 机 / 主 / 动 / 降 / 噪"
+                ]
+              ]
+            },
+            {
+              "type": "p",
+              "text": "于是出现了有意思的不对称：`match` 用字段的 search_analyzer 切查询串，和索引期一致，命中 15 条；而 `term` 完全不分析，直接拿「蓝」这个单字去倒排里找 —— ik 索引里没有单字 token，命中 0。"
+            },
+            {
+              "type": "figure",
+              "kind": "analyzer-pipeline",
+              "caption": "索引期与查询期各过一次分析链；term 跳过查询期分析，所以直接暴露 token 差异"
+            },
+            {
+              "type": "h",
+              "text": "所以排查顺序是反的"
+            },
+            {
+              "type": "ul",
+              "items": [
+                "先 `_analyze`（按字段）看索引里到底存了什么 token",
+                "再 `_analyze`（显式 analyzer）看你想查的东西会被切成什么",
+                "最后才去改 query：改 term/match、加 .keyword、换分词器，或者重建索引"
+              ]
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "text": "换分词器通常要重建索引：`analyzer` 改不了已写入的 token，只能新建索引再 reindex（m8-2）。只有 `search_analyzer` 能在线改，改完立刻影响查询侧。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "对同一串文本跑字段分析与 standard 分析，逐 token 对照 position 与 offset",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 text 换成只有空格的「蓝牙耳机」，看 ik 是否切出复合词",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_analyze",
+              "body": {
+                "field": "title",
+                "text": "蓝牙耳机"
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "按 title 字段分析",
+              "method": "POST",
+              "path": "/eslab-goods-core/_analyze",
+              "watch": "tokens 的数量与每个 token 的 position",
+              "expect": "4 个 token：蓝牙 / 耳机 / 主动 / 降噪，position 连续递增；空格处 position 会跳一格",
+              "body": {
+                "field": "title",
+                "text": "蓝牙耳机 主动降噪"
+              }
+            },
+            {
+              "task": "显式用 standard 分析同一串",
+              "method": "POST",
+              "path": "/_analyze",
+              "watch": "tokens 数量与长度",
+              "expect": "8 个单字 token。standard 对中文不做词典切分，每个汉字就是一个 token",
+              "body": {
+                "analyzer": "standard",
+                "text": "蓝牙耳机 主动降噪"
+              }
+            },
+            {
+              "task": "term 打单字「蓝」",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "命中数是否为 0，有没有报错",
+              "expect": "0 条且 HTTP 200。term 不分析，而 ik 索引里最小单位是「蓝牙」，没有单字「蓝」—— 零命中不报错，所以最容易误判",
+              "body": {
+                "size": 0,
+                "query": {
+                  "term": {
+                    "title": "蓝"
+                  }
+                }
+              }
+            }
+          ],
+          "pitfall": "看到 0 命中就去改 query、加 boost、换 operator。真正的顺序是先用 _analyze 对齐 token，再决定改哪一侧。",
+          "takeaway": "搜不到 = token 对不上。索引期与查询期各分析一次，term 直接跳过查询期分析，这就是全部机制。",
+          "next": "m3-1",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
           }
         }
       ]
@@ -1747,7 +2159,7 @@
             }
           ],
           "takeaway": "refresh 决定可见性，flush 决定持久性，两个时间尺度不要混为一谈",
-          "next": "m4-1",
+          "next": "m3-4",
           "prereq": {
             "cluster": true,
             "indices": [
@@ -1757,6 +2169,125 @@
               }
             ],
             "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+          }
+        },
+        {
+          "id": "m3-4",
+          "title": "bulk 的逐项失败与安全重放",
+          "objective": "读懂 HTTP 200 里的 errors 与 items，并用 create/index 的语义差决定「能不能直接重放」",
+          "hook": "监控显示写入接口 200、耗时正常，索引里却少了几千条 —— bulk 的部分失败不会反映在 HTTP 状态码上。",
+          "predict": "先猜：一个 2 条动作的 bulk 里 1 条 create 撞了已存在的 _id，HTTP 会返回 200 还是 409？",
+          "brief": "先跑一个混合 bulk：create 一个已存在的 _id（必冲突）+ index 一个新 _id（必成功）。看 HTTP 200 但 errors=true、items 里一条 409 一条 201。再把 create 换成 index 重放，errors 变 false。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`_bulk` 的设计前提是「部分成功」：它逐条执行、逐条返回状态，整体 HTTP 只要请求本身合法就是 200。判断成败必须读两个地方：顶层的 `errors` 布尔值，和 `items[]` 里每个动作的 `status`。"
+            },
+            {
+              "type": "h",
+              "text": "两轮实测"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "动作",
+                "第一轮（create）",
+                "第二轮（index 重放）"
+              ],
+              "rows": [
+                [
+                  "create core-0（已存在）",
+                  "409 version_conflict",
+                  "201 created"
+                ],
+                [
+                  "index bulk-new",
+                  "201 created",
+                  "200 updated"
+                ]
+              ]
+            },
+            {
+              "type": "p",
+              "text": "第二轮把 create 换成 index 之后全部成功，但代价是：如果 core-0 在此期间被别人改过，这一写就把它覆盖了。**幂等不等于安全** —— index 是「写进去就行」，create 是「不存在才写」。"
+            },
+            {
+              "type": "h",
+              "text": "所以重试策略要按动作类型分开"
+            },
+            {
+              "type": "ul",
+              "items": [
+                "`create`：幂等且安全，可以无脑重放；重复执行只会得到 409，不会破坏别人的修改",
+                "`index`：幂等但会覆盖，重放前要确认自己持有最新版本（或接受覆盖）",
+                "`update`：内部是读-改-写，重放可能叠加效果（如 script 自增），要用 `if_seq_no` 或版本字段保护",
+                "`delete`：幂等，重复删只会得到 not_found"
+              ]
+            },
+            {
+              "type": "code",
+              "lang": "text",
+              "text": "POST /_bulk\n{\"create\":{\"_index\":\"eslab-goods-core\",\"_id\":\"core-0\"}}\n{\"sku\":\"DUP\"}\n{\"index\":{\"_index\":\"eslab-goods-core\",\"_id\":\"bulk-new\"}}\n{\"sku\":\"BULK-NEW\",...}"
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "text": "生产上还要处理 429（写入队列满）与 503：它们同样出现在 items 里。正确做法是把 status 非 2xx 的条目挑出来做退避重试，而不是整批重发。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "发一个必然部分失败的 bulk，再换成 index 重放，比较两轮的 errors 与 items",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "对已存在的 _id 用 op_type=create 单条写入，确认也是 409",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_doc/core-2?op_type=create",
+              "body": {
+                "sku": "X"
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "对已存在的 _id 用 create 写入",
+              "method": "POST",
+              "path": "/eslab-goods-core/_doc/core-2?op_type=create",
+              "watch": "HTTP 状态与 error.type",
+              "expect": "409 version_conflict_engine_exception：create 只在文档不存在时成立，这一条可以安全重放",
+              "body": {
+                "sku": "DUP"
+              }
+            },
+            {
+              "task": "同一个 _id 改用 index 写入",
+              "method": "POST",
+              "path": "/eslab-goods-core/_doc/core-2?refresh=true",
+              "watch": "result 与 _version",
+              "expect": "200 / result=updated，_version 递增。index 不报错但会整条覆盖 —— 幂等不等于无害",
+              "body": {
+                "sku": "DUP"
+              }
+            },
+            {
+              "task": "读回这条文档",
+              "method": "GET",
+              "path": "/eslab-goods-core/_doc/core-2",
+              "watch": "_source 里还剩几个字段",
+              "expect": "只剩 sku 一个字段：刚才那次 index 把原来的 7 个字段全覆盖掉了"
+            }
+          ],
+          "pitfall": "只看 bulk 的 HTTP 状态做告警。errors=true 时 HTTP 仍是 200，必须解析 items 才能发现丢数据。",
+          "takeaway": "bulk 逐条成败看 items；create 可安全重放、index 会覆盖；重试要按动作语义分类，而不是整批重发。",
+          "next": "m4-1",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
           }
         }
       ]
@@ -2812,7 +3343,7 @@
             }
           ],
           "takeaway": "过滤条件一律进 filter，算分只留给真正需要按相关性排序的查询",
-          "next": "m5-1",
+          "next": "m4-7",
           "prereq": {
             "cluster": true,
             "indices": [
@@ -2822,6 +3353,255 @@
               }
             ],
             "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+          }
+        },
+        {
+          "id": "m4-7",
+          "title": "只取需要的字段：_source / docvalue / stored",
+          "objective": "分清三种取字段方式的数据来源与限制，并知道它们都不改变命中集",
+          "hook": "列表页只要 4 个字段，却把整条 20 字段的文档全拉回来 —— 带宽与反序列化都花在了看不见的地方。",
+          "predict": "先猜：把 _source 裁到 2 个字段，命中总数会变吗？对 text 字段要 docvalue_fields 会怎样？",
+          "brief": "同一 query 跑三种取法：_source 裁剪、_source:false + docvalue_fields、stored_fields。三种命中总数完全相同（30/30/30），返回字段数 2/3/0；再加一条对 text 要 docvalue 的请求，直接 400。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`_source` 是写入时原样保存的那份 JSON。裁剪它（`_source: [\"sku\",\"title\"]`）只减少传输与反序列化，**不改变命中集** —— 查询条件在倒排上算，跟返回什么字段无关。"
+            },
+            {
+              "type": "p",
+              "text": "`docvalue_fields` 读的是列存（doc_values），只对 keyword、数值、日期有效。它的值是规范化后的结果，比如日期是 epoch 毫秒、`scaled_float` 是按 scaling_factor 放大的整数。"
+            },
+            {
+              "type": "p",
+              "text": "`stored_fields` 只对 mapping 里显式 `store: true` 的字段有效。默认 mapping 不存 store，所以它对普通字段返回空的 `fields` —— 这是最容易被误判成「字段丢了」的现象。"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "取法",
+                "命中总数",
+                "返回字段数",
+                "数据来源"
+              ],
+              "rows": [
+                [
+                  "_source: [sku,title]",
+                  "30",
+                  "2",
+                  "原始 JSON 裁剪"
+                ],
+                [
+                  "_source:false + docvalue_fields",
+                  "30",
+                  "3",
+                  "列存"
+                ],
+                [
+                  "stored_fields: [sku,title]",
+                  "30",
+                  "0",
+                  "mapping 未开 store"
+                ],
+                [
+                  "docvalue_fields: [title]",
+                  "—",
+                  "—",
+                  "400：text 无 doc_values"
+                ]
+              ]
+            },
+            {
+              "type": "figure",
+              "kind": "write-path",
+              "caption": "_source 与 doc_values 是写入时同时产生的两份结构：前者给取回原文，后者给排序聚合"
+            },
+            {
+              "type": "callout",
+              "tone": "info",
+              "text": "想省带宽优先裁 _source；想让数值字段免解析、直接参与排序聚合，用 docvalue_fields；stored_fields 只在你显式设计过 store 时才有意义。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "同一 query 跑三种取字段方式，并额外验证「对 text 要 docvalue」的报错",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 _source 设成 false 且不要任何 fields，看响应里还剩什么",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "body": {
+                "size": 1,
+                "_source": false,
+                "query": {
+                  "match_all": {}
+                }
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "只取两个字段",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "hits.total 与 _source 的字段数",
+              "expect": "total 仍是 30，_source 只有 sku 与 title 两个字段 —— 命中集没变，只是载荷变小",
+              "body": {
+                "size": 1,
+                "_source": [
+                  "sku",
+                  "title"
+                ],
+                "query": {
+                  "match_all": {}
+                }
+              }
+            },
+            {
+              "task": "完全不要 _source",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "每条 hit 里还剩哪些键",
+              "expect": "只剩 _index/_id/_score，没有 _source。做「只判断存在性」的查询时这样最省",
+              "body": {
+                "size": 1,
+                "_source": false,
+                "query": {
+                  "match_all": {}
+                }
+              }
+            },
+            {
+              "task": "对 text 字段要 docvalue",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "HTTP 状态与 error.reason",
+              "expect": "400 illegal_argument_exception：Fielddata is disabled on [title]，text 字段没有列存",
+              "body": {
+                "size": 1,
+                "_source": false,
+                "docvalue_fields": [
+                  "title"
+                ]
+              }
+            }
+          ],
+          "pitfall": "以为裁字段能加速查询。它只减少返回载荷；真正影响耗时的是 query 与排序，不是 _source 里的字段数。",
+          "takeaway": "_source 省带宽、docvalue 读列存、stored 要显式开；三种都不改命中集，改的是载荷与可得性。",
+          "next": "m4-8",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
+          }
+        },
+        {
+          "id": "m4-8",
+          "title": "多请求读取：_msearch 与 _mget",
+          "objective": "把多个独立读取合成一个请求，并确认子请求之间的失败是隔离的",
+          "hook": "商品列表页要同时取 20 个 SKU 的详情、还要跑两种排序的搜索 —— 循环发 40 个请求，还是发 1 个？",
+          "predict": "先猜：_msearch 里有一条子查询报错（比如对 text 排序），整体 HTTP 是 200 还是 400？",
+          "brief": "一个 _msearch 塞两条查询：第一条正常（命中 8 条），第二条故意对 text 排序（该子响应报错）。整体仍是 HTTP 200。再跑 _mget 取 core-0 / core-1 / missing 三个 id，前两个 found=true、missing 单独 found=false。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`_msearch` 把多个搜索合并成一个往返：body 是 NDJSON，**奇数行是 header**（可以只写 `{\"index\":\"xxx\"}`），**偶数行是 query**。返回的 `responses` 数组与请求顺序一一对应。"
+            },
+            {
+              "type": "p",
+              "text": "`_mget` 同理，把多个 `GET /{index}/_doc/{id}` 合并。它对不存在的 id 返回 `found:false` 而不是 404 —— 只有索引本身不存在才会整体报错。"
+            },
+            {
+              "type": "h",
+              "text": "真正的价值不是「快」，是隔离"
+            },
+            {
+              "type": "p",
+              "text": "循环发 40 个请求，任何一个失败都要单独处理；`_msearch` 把失败关在**自己那条子响应**里，其余子请求照常返回。本关实测：第 1 条命中 8 条，第 2 条对 `title` 排序报 400，整体 HTTP 仍是 200。"
+            },
+            {
+              "type": "code",
+              "lang": "text",
+              "text": "POST /_msearch\n{\"index\":\"eslab-goods-core\"}\n{\"size\":0,\"query\":{\"term\":{\"category\":\"数码影音\"}}}\n{\"index\":\"eslab-goods-core\"}\n{\"size\":0,\"sort\":[{\"title\":\"asc\"}]}"
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "text": "NDJSON 对格式极其敏感：最后一行必须以换行结尾，header 行不能是空对象以外的非法 JSON。拼错一个换行常常得到 `The msearch request must be terminated by a newline`。"
+            },
+            {
+              "type": "p",
+              "text": "什么时候不该合并：子请求之间需要前一步结果（比如先查 A 再按 A 的结果查 B）时，合并没有意义；单条查询本身就够快时，合并只增加复杂度。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "一个 _msearch 里放一条正常查询与一条必然报错的查询，再跑 _mget 取含缺失 id 的三条文档",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 missing 换成 core-3，看 found 是否变 true",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_mget",
+              "body": {
+                "ids": [
+                  "core-0",
+                  "missing"
+                ]
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "批量取三条文档，其中一条不存在",
+              "method": "POST",
+              "path": "/eslab-goods-core/_mget",
+              "watch": "docs 数组长度与每条 found",
+              "expect": "3 条 docs，前两条 found=true，missing 那条 found=false 且不报错 —— 缺失不是异常",
+              "body": {
+                "ids": [
+                  "core-0",
+                  "core-1",
+                  "missing"
+                ]
+              }
+            },
+            {
+              "task": "用 _mget 验证 op_type 之后的状态",
+              "method": "GET",
+              "path": "/eslab-goods-core/_doc/core-0",
+              "watch": "_source 与 _version",
+              "expect": "能看到上一次写入留下的 _version；_mget 只是批量版的同一个读取路径"
+            },
+            {
+              "task": "单条 _search 对照",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "命中数",
+              "expect": "8 条。与 _msearch 第一条子响应应当完全一致 —— 合并请求不改变结果，只改变往返次数",
+              "body": {
+                "size": 0,
+                "query": {
+                  "term": {
+                    "category": "数码影音"
+                  }
+                }
+              }
+            }
+          ],
+          "pitfall": "把 _msearch 当「一定更快」。它是减少往返，不是并行加速；单条查询很快时合并反而增加解析开销。",
+          "takeaway": "_msearch / _mget 合并的是往返次数，隔离的是单条失败；NDJSON 格式错一个换行就整批失败。",
+          "next": "m5-1",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
           }
         }
       ]
@@ -3254,7 +4034,7 @@
             }
           ],
           "takeaway": "嵌套聚合的代价是桶数相乘，先想清楚要看什么再往下钻",
-          "next": "m6-1",
+          "next": "m5-4",
           "prereq": {
             "cluster": true,
             "indices": [
@@ -3264,6 +4044,348 @@
               }
             ],
             "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+          }
+        },
+        {
+          "id": "m5-4",
+          "title": "filter / range / cardinality：三种口径",
+          "objective": "用一个请求同时算出子集、区间分布与去重基数，并知道哪个是精确值、哪个是近似值",
+          "hook": "运营要「在售商品的均价、价格段分布、覆盖多少个品牌」，三个问题三个口径 —— 该发三个请求还是一个？",
+          "predict": "先猜：cardinality 给出的品牌数，与 terms 聚合的桶数一定相等吗？",
+          "brief": "一个 _search 挂四组聚合：filter(stock>20) 里嵌 stats(price)、range 价格三档、cardinality(brand)、terms(brand, size=50)。实测 19 条子集、均价 299.00、区间 6/15/9、基数 6 与精确桶数 6 一致。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`filter` 聚合先筛子集再算子聚合，**不影响外层 hits**。它等价于「在这个条件下单独跑一次聚合」，但省了一次往返。"
+            },
+            {
+              "type": "p",
+              "text": "`range` 聚合按区间切桶，区间是左闭右开（`to` 不含）。桶的数量由你给的区间决定，跟数据无关 —— 空桶也会出现，这跟 terms 只返回存在的值不同。"
+            },
+            {
+              "type": "p",
+              "text": "`cardinality` 用 HyperLogLog++ 做**近似**去重：内存固定（默认 precision_threshold=3000 以内基本精确），基数越大误差越明显。本关 6 个品牌，它与 terms 桶数一致；不能因此认为它在任何规模下都精确。"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "聚合",
+                "结果",
+                "精确性"
+              ],
+              "rows": [
+                [
+                  "filter(stock>20)",
+                  "19 条",
+                  "精确"
+                ],
+                [
+                  "stats(price) 在其中",
+                  "均价 299.00",
+                  "精确"
+                ],
+                [
+                  "range 价格三档",
+                  "6 / 15 / 9",
+                  "精确"
+                ],
+                [
+                  "cardinality(brand)",
+                  "6",
+                  "近似（小基数下与精确一致）"
+                ],
+                [
+                  "terms(brand, size=50)",
+                  "6 个桶",
+                  "精确，但受 size 截断"
+                ]
+              ]
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "text": "不要把 cardinality 的结果标成「精确用户数」。它省的是内存，代价是误差；要精确就得用 terms 全量桶，或者回到数据库 count distinct。"
+            },
+            {
+              "type": "p",
+              "text": "同一个请求里算多个口径，是 ES 相对「多次查库」最实用的能力之一。前提是这些口径共享同一个 query —— 条件不同就拆请求，别硬塞。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "一个 _search 里同时算 filter+stats、range、cardinality、terms，并把 cardinality 与 terms 桶数对照",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 filter 的 stock>20 改成 stock>35，看子集与均价怎么变",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "f": {
+                    "filter": {
+                      "range": {
+                        "stock": {
+                          "gt": 35
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "只要子集文档数",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "doc_count",
+              "expect": "19 条。stock 从 10 递增到 39，>20 的正好 19 条 —— filter 聚合不影响外层 hits",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "f": {
+                    "filter": {
+                      "range": {
+                        "stock": {
+                          "gt": 20
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "task": "价格区间分布",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "各桶 doc_count 之和是否等于 30",
+              "expect": "6 + 15 + 9 = 30，左闭右开不重不漏",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "r": {
+                    "range": {
+                      "field": "price",
+                      "ranges": [
+                        {
+                          "to": 150
+                        },
+                        {
+                          "from": 150,
+                          "to": 300
+                        },
+                        {
+                          "from": 300
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "task": "品牌去重基数",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "cardinality 的 value 与 terms 桶数",
+              "expect": "两者都是 6。小基数下 HLL 与精确值一致，规模上去后才会有误差",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "c": {
+                    "cardinality": {
+                      "field": "brand"
+                    }
+                  },
+                  "t": {
+                    "terms": {
+                      "field": "brand",
+                      "size": 50
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "pitfall": "把 range 的 `to` 当闭区间。`{\"to\":150}` 不含 150，150.00 会落到下一档 —— 价格分段出错最常见的原因。",
+          "takeaway": "filter 算子集、range 算分布、cardinality 算基数；前两个精确，第三个近似，报告里必须标口径。",
+          "next": "m5-5",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
+          }
+        },
+        {
+          "id": "m5-5",
+          "title": "composite：遍历全部桶，而不是 Top-N",
+          "objective": "用 after_key 逐页取完全部桶，并与 terms 的 Top-N 语义对照",
+          "hook": "terms 聚合只给你 count 最高的 10 个品牌；要导出「全部 2000 个品牌各多少条」，翻 200 页 terms 也不对。",
+          "predict": "先猜：composite 每页 2 个桶，6 个品牌要翻几页？最后一页的 after_key 长什么样？",
+          "brief": "composite size=2 逐页遍历品牌，实测翻 4 次（最后一页后 after_key 消失），共 6 个桶、去重后仍是 6；与 terms(size=50) 的精确桶数一致，无重复无遗漏。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`terms` 聚合按 count 排序取前 N 个，超出的部分只体现在 `sum_other_doc_count` 里 —— 它是**采样式的排序**，不是遍历。"
+            },
+            {
+              "type": "p",
+              "text": "`composite` 相反：它按你给的 sources 做字典序游标，每页返回 `size` 个桶和一个 `after_key`，把 `after_key` 传回去就接着下一页。翻到最后一页时 `after_key` 消失。它保证**不重不漏**，但没有「谁最多」的语义。"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "批次",
+                "桶数",
+                "游标"
+              ],
+              "rows": [
+                [
+                  "第 1 页",
+                  "2",
+                  "有 after_key"
+                ],
+                [
+                  "第 2 页",
+                  "2",
+                  "有 after_key"
+                ],
+                [
+                  "第 3 页",
+                  "2",
+                  "有 after_key"
+                ],
+                [
+                  "第 4 页",
+                  "0",
+                  "after_key 消失，遍历结束"
+                ]
+              ]
+            },
+            {
+              "type": "p",
+              "text": "两者不是替代关系：要「卖得最好的 10 个品牌」用 terms；要「全部品牌清单」用 composite。判断标准是**你是否需要穷尽**。"
+            },
+            {
+              "type": "callout",
+              "tone": "info",
+              "text": "composite 的游标机制不受 `index.max_result_window`（默认 10000）限制，因为它不是 from/size 分页 —— 这是它能用来导出的原因。"
+            },
+            {
+              "type": "p",
+              "text": "多字段分组时把多个 source 放进同一个 composite，它会按 (source1, source2) 的组合逐页返回；不要用嵌套 terms 去模拟，那样会漏桶。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "composite size=2 逐页遍历品牌，收集 after_key 直到它消失，再与 terms 精确桶数对比",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 size 改成 1，看页数是否变成 6 页",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "all": {
+                    "composite": {
+                      "size": 1,
+                      "sources": [
+                        {
+                          "brand": {
+                            "terms": {
+                              "field": "brand"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "composite 第一页",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "buckets 数量与 after_key 是否存在",
+              "expect": "2 个桶 + 一个 after_key；把这个 key 传回去就是第 2 页",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "all": {
+                    "composite": {
+                      "size": 2,
+                      "sources": [
+                        {
+                          "brand": {
+                            "terms": {
+                              "field": "brand"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "task": "terms 精确桶数对照",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "buckets 数量",
+              "expect": "6 个桶。size 足够大时 terms 与 composite 的总量应当一致",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "t": {
+                    "terms": {
+                      "field": "brand",
+                      "size": 50
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "task": "terms 默认 size 的截断行为",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "buckets 数、sum_other_doc_count",
+              "expect": "默认 size=10，本例只有 6 个品牌所以不截断；品牌数超过 10 时 sum_other_doc_count 会大于 0",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "t": {
+                    "terms": {
+                      "field": "brand"
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "pitfall": "用 terms 加 from 翻页来「遍历全部桶」。terms 的 from/size 是桶级分页，排序不稳定，会重复或漏桶。",
+          "takeaway": "terms 取 Top-N（会截断），composite 用 after_key 穷尽遍历（不重不漏）；要导出就用 composite。",
+          "next": "m6-1",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
           }
         }
       ]
@@ -3630,7 +4752,7 @@
             }
           ],
           "takeaway": "先读 profile 的 breakdown 再动手；凭直觉优化通常改错地方",
-          "next": "m7-1",
+          "next": "m6-4",
           "prereq": {
             "cluster": true,
             "indices": [
@@ -3640,6 +4762,267 @@
               }
             ],
             "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+          }
+        },
+        {
+          "id": "m6-4",
+          "title": "scroll 与 PIT：批量遍历的两种做法",
+          "objective": "用两条路线各取完全部文档，比较 id 集合是否一致，并理解上下文必须显式关闭",
+          "hook": "要导出全量商品给推荐系统，翻 1 万页 from/size 会被 max_result_window 拦住，还会越翻越慢。",
+          "predict": "先猜：scroll 与 PIT+search_after 取到的文档集合，会完全一样吗？",
+          "brief": "路线 A：scroll（size=10，sort=_doc）分 3 批取完 30 条；路线 B：PIT + search_after（sort=price,_shard_doc）分 3 页取完 30 条。两个 id 集合完全相同，用完都显式 DELETE 了上下文。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`scroll` 在服务端保留一份搜索上下文，每次带 `scroll_id` 取下一批。它适合**一次性离线导出**：顺序不重要（`sort: _doc` 最快），只要能取完。"
+            },
+            {
+              "type": "p",
+              "text": "`PIT`（point in time）+ `search_after` 则是「快照 + 游标」：PIT 固定住打开那一刻的段，`search_after` 用上一页最后一条的排序值继续。它适合**在线翻页**，可以断点续翻，也不占长连接上下文。"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "路线",
+                "请求数",
+                "取到文档",
+                "适用场景"
+              ],
+              "rows": [
+                [
+                  "scroll",
+                  "3",
+                  "30 条",
+                  "离线导出、一次性遍历"
+                ],
+                [
+                  "PIT + search_after",
+                  "3",
+                  "30 条",
+                  "在线翻页、可续翻、可并发"
+                ]
+              ]
+            },
+            {
+              "type": "figure",
+              "kind": "paging-window",
+              "caption": "scroll 是把窗口固定在服务端；search_after 是把游标交给客户端"
+            },
+            {
+              "type": "h",
+              "text": "都必须显式关闭"
+            },
+            {
+              "type": "p",
+              "text": "scroll 上下文占用堆内存，默认 1 分钟无访问后过期；PIT 持有段引用，不关会阻碍段合并与删除。本关把 `DELETE /_search/scroll` 与 `DELETE /_pit` 都做进了流程，`succeeded=true` 才算完成。"
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "text": "翻页期间如果有大量写入，scroll 看到的是「打开时的段」，新写入的文档不会出现 —— 这是特性不是 bug，导出前要明确快照时点。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "scroll 与 PIT+search_after 各遍历一遍全部 30 条，比对 id 集合并关闭上下文",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "打开一个 1 分钟的 scroll 上下文（不关，等它自己过期）",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search?scroll=1m",
+              "body": {
+                "size": 2,
+                "sort": [
+                  "_doc"
+                ]
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "打开一个 scroll 上下文",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search?scroll=1m",
+              "watch": "_scroll_id 是否存在、hits 数量",
+              "expect": "返回 2 条 + 一个 _scroll_id。这个 id 就是后续取批次的凭证，1 分钟不访问即过期",
+              "body": {
+                "size": 2,
+                "sort": [
+                  "_doc"
+                ]
+              }
+            },
+            {
+              "task": "PIT 方式的第一页",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "每条 hit 的 sort 数组",
+              "expect": "sort 数组就是下一页 search_after 要传的值；有重复价格时必须再加 _shard_doc 兜底",
+              "body": {
+                "size": 2,
+                "sort": [
+                  {
+                    "price": "asc"
+                  }
+                ],
+                "query": {
+                  "match_all": {}
+                }
+              }
+            },
+            {
+              "task": "翻页期间的数据快照语义",
+              "method": "GET",
+              "path": "/eslab-goods-core/_count",
+              "watch": "count 是否等于 30",
+              "expect": "30 条。scroll/PIT 冻结的是打开时刻的段，之后写入不影响这次遍历"
+            }
+          ],
+          "pitfall": "scroll 用完不关。上下文会一直持有段引用直到过期，批量导出脚本跑几次就能把堆吃满。",
+          "takeaway": "离线导出用 scroll、在线翻页用 PIT+search_after；两者都要显式关闭，取到的集合应当一致。",
+          "next": "m6-5",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
+          }
+        },
+        {
+          "id": "m6-5",
+          "title": "explain：一条文档为什么得分",
+          "objective": "读 explanation 树定位「为什么这条排在这里」，并知道它不能当性能工具",
+          "hook": "搜「蓝牙耳机」，某个不相关的商品排在第一位。改 boost 之前，先让 ES 自己说清楚分是怎么算出来的。",
+          "predict": "先猜：同一篇文档，search 里的 _score 与 _explain 重放同一 query 得到的分数，会一样吗？",
+          "brief": "取 match 查询的最高分文档 core-0（score 1.39），用 _explain 重放同一 query 得到同样的 1.39；再换成 term 查询，matched=false —— 因为 term 不分析，倒排里没有整串。",
+          "deep": [
+            {
+              "type": "p",
+              "text": "`_explain/{id}` 对**一篇文档 + 一个 query** 做诊断：返回 `matched` 布尔值与一棵 `explanation` 树，每个节点带 `value`（这一层的贡献分）、`description`（做了什么）与 `details`（子节点）。"
+            },
+            {
+              "type": "p",
+              "text": "它的分数与 search 里同 query 的 `_score` 一致 —— 本关实测两处都是 1.39。所以可以用它来验证「换参数后分数该不该变」，但**不能**用来测耗时：它不做 fetch、不做分页，还更慢。"
+            },
+            {
+              "type": "h",
+              "text": "最有用的一种用法：看「为什么没匹配」"
+            },
+            {
+              "type": "p",
+              "text": "把 match 换成 term 再 explain 同一篇文档，`matched` 变 false，`description` 会直接说哪个子句没命中。比起猜「是不是分词问题」，这条路一步到位。"
+            },
+            {
+              "type": "table",
+              "columns": [
+                "诊断",
+                "matched",
+                "score"
+              ],
+              "rows": [
+                [
+                  "search 最高分文档",
+                  "—",
+                  "1.39"
+                ],
+                [
+                  "_explain + match",
+                  "true",
+                  "1.39"
+                ],
+                [
+                  "_explain + term",
+                  "false",
+                  "0.00"
+                ]
+              ]
+            },
+            {
+              "type": "callout",
+              "tone": "info",
+              "text": "explanation 树的 value 是「这一层的贡献」，父节点不一定等于子节点之和 —— 取决于 boost 模式（sum / max / multiply）。逐层读 description 比只盯总分有用。"
+            },
+            {
+              "type": "p",
+              "text": "读树的顺序：从根往下找 value 最大的分支，看它是哪个子句贡献的，再回到 query 结构里找对应的字段与权重。三次就能定位绝大多数「排序不符预期」。"
+            }
+          ],
+          "steps": [
+            {
+              "label": "运行本关",
+              "desc": "对最高分文档分别 explain 同一个 match 与一个 term，对照 matched、score 与根因描述",
+              "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "把 query 里的词换成一个不存在的词，看 matched 变 false 后的 explanation",
+              "kind": "console",
+              "method": "POST",
+              "path": "/eslab-goods-core/_explain/core-0",
+              "body": {
+                "query": {
+                  "match": {
+                    "title": "不存在的词"
+                  }
+                }
+              }
+            }
+          ],
+          "probes": [
+            {
+              "task": "先看 search 的分数",
+              "method": "POST",
+              "path": "/eslab-goods-core/_search",
+              "watch": "第一条的 _id 与 _score",
+              "expect": "core-0、score 约 1.39。这个分数就是下面 explain 要对齐的基准",
+              "body": {
+                "size": 1,
+                "query": {
+                  "match": {
+                    "title": "蓝牙耳机"
+                  }
+                }
+              }
+            },
+            {
+              "task": "重放同一 query 的 explain",
+              "method": "POST",
+              "path": "/eslab-goods-core/_explain/core-0",
+              "watch": "matched 与 explanation.value",
+              "expect": "matched=true，value 与 search 的 _score 相同；details 里能看到各字段/词项的贡献",
+              "body": {
+                "query": {
+                  "match": {
+                    "title": "蓝牙耳机"
+                  }
+                }
+              }
+            },
+            {
+              "task": "换成 term 再 explain",
+              "method": "POST",
+              "path": "/eslab-goods-core/_explain/core-0",
+              "watch": "matched 与 description",
+              "expect": "matched=false。term 不分析，倒排里没有「蓝牙耳机」整串，所以不匹配 —— 这就是「为什么查不到」的官方答案",
+              "body": {
+                "query": {
+                  "term": {
+                    "title": "蓝牙耳机"
+                  }
+                }
+              }
+            }
+          ],
+          "pitfall": "把 explain 的耗时当查询基准。它是诊断工具，开销比普通查询高，也没有复用价值。",
+          "takeaway": "explain 回答「为什么这条得分这样」与「为什么不匹配」；分数可对齐 search，耗时不可对比。",
+          "next": "m7-1",
+          "prereq": {
+            "cluster": true,
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关会重建 30 条样例的 eslab-goods-core，不依赖 v1/v2"
           }
         }
       ]
@@ -3652,95 +5035,129 @@
         {
           "id": "m7-1",
           "title": "分片与容量规划",
-          "objective": "用真实体积与段数倒推分片数，而不是套网上的公式",
-          "hook": "分片是并行度单位，也是开销单位——单节点上它只带来开销。",
-          "predict": "200 万文档、单分片 30GB 上限，应该建几个分片？",
-          "brief": "v1 单分片 88MB / 查询 Xms，v2 三分片 62.7MB / 查询 Yms。单节点、小数据量下，多分片并不会更快：并行收益被固定开销抵消。规划口径是「单分片 10–50GB」，2 万文档（约 10MB）一个分片绰绰有余；2 亿文档（60GB）才需要 2–6 个分片。",
+          "objective": "用受控实验单独测「主分片数」的影响，并把「整体设计差异」与「分片数影响」分开归因",
+          "hook": "「3 个分片比 1 个快」这句话，在只对比过 v1 与 v2 的人嘴里是猜的 —— 因为那两个索引同时变了四件事。",
+          "predict": "先猜：同一份 mapping、同一份 2 万条数据，只把主分片从 1 改成 3，查询会快多少？",
+          "brief": "先建两个受控索引 eslab-goods-shard1 / shard3：定义完全同构，唯一差别是 number_of_shards。再用同一查询各采 5 轮取中位数。v1 / v2 那一组只作整体设计对照，不作归因。",
           "deep": [
             {
               "type": "p",
-              "text": "分片规划是 ES 里最容易被「经验数字」带偏的一题。10–50GB / 分片是经验值，但它成立的前提是「数据量足够大、分片能真正独立承担查询」。本机 2 万条、20 万条都远在这个区间之外。"
+              "text": "上一版这一关拿 v1 与 v2 对比，然后说「分片数影响查询」。这个结论站不住：v1 与 v2 之间同时变了四件事 —— 主分片数、Mapping 显式程度、分词器（standard vs ik）、doc_values 配置。四个变量一起动，差异没法归给其中任何一个。"
+            },
+            {
+              "type": "h",
+              "text": "把变量缩减到一个"
+            },
+            {
+              "type": "p",
+              "text": "本关新增两个索引：`eslab-goods-shard1` 与 `eslab-goods-shard3`。两者都用 v2 的定义（同 mapping、同 analyzer、同 doc_values），只把 `number_of_shards` 分别设成 1 和 3，然后从同一份源数据 reindex 进来。这是标准的受控实验：只改一个变量。"
             },
             {
               "type": "table",
               "columns": [
-                "约束",
-                "真实含义",
-                "本项目的实际情况"
+                "索引",
+                "分片数",
+                "Mapping",
+                "数据",
+                "对照类型"
               ],
               "rows": [
                 [
-                  "单分片 10–50GB",
-                  "让每个分片有足够数据摊薄固定开销",
-                  "20 万条约 60–90MB，远低于下限"
+                  "v1",
+                  "1",
+                  "全动态",
+                  "2 万",
+                  "整体设计对照"
                 ],
                 [
-                  "分片数 = 节点数的整数倍",
-                  "让查询均匀打到各节点",
-                  "单节点，只有 1 个节点"
+                  "v2",
+                  "3",
+                  "显式 + ik",
+                  "2 万",
+                  "整体设计对照"
                 ],
                 [
-                  "分片不是越多越好",
-                  "每个分片都有固定开销（文件句柄、堆、集群状态）",
-                  "3 分片已经足够"
+                  "shard1",
+                  "1",
+                  "显式 + ik",
+                  "2 万",
+                  "受控：只差分片数"
+                ],
+                [
+                  "shard3",
+                  "3",
+                  "显式 + ik",
+                  "2 万",
+                  "受控：只差分片数"
                 ]
               ]
             },
             {
+              "type": "figure",
+              "kind": "segment-merge",
+              "caption": "每个分片是一个独立的 Lucene 实例：自己一套段、自己的文件句柄与堆内结构"
+            },
+            {
               "type": "h",
-              "text": "为什么本关的对比不能归因到分片数"
+              "text": "分片为什么既是并行度也是开销"
+            },
+            {
+              "type": "ul",
+              "items": [
+                "并行度：一次查询会打到所有分片，单节点上多分片能被多核同时处理 —— 这是收益。",
+                "开销：每个分片一份 Lucene 实例、一份文件句柄、一份堆内结构，查询还要做一次「合并各分片 Top-K」的归并 —— 这是成本。",
+                "单节点的天花板：机器只有这么多核，分片数超过核数后并行收益趋零，开销却继续涨。"
+              ]
             },
             {
               "type": "p",
-              "text": "v1 与 v2 之间同时变了四件事：分片数（1 vs 3）、Mapping（动态 vs 显式）、分词器（standard vs ik）、doc_values（sku/tags 在 v1 是 text，没有 doc_values）。体积与耗时的差异是这四个因素叠加的结果，**不能单独归因给分片数**。"
+              "text": "本机 2 万条、单分片的绝对耗时才几毫秒，两组差值大概率落在噪声里。这不是实验失败 —— **「本规模下看不出差异」本身就是结论**，它说明规划分片要看数据量，而不是看网上那句「分片越多越快」。"
             },
             {
               "type": "callout",
               "tone": "warn",
-              "text": "这是本项目里被明确标记「结论需要打折」的关卡之一：它有关卡、有数字、有源码，但对照变量没有控制住。正确读法是「知道有这些因素」，而不是「3 分片比 1 分片快 X%」。",
-              "title": "方法学提醒"
-            },
-            {
-              "type": "p",
-              "text": "那这一关还剩下什么价值？剩下的是**决策清单**：分片数建索引时定死、副本数可改、分片过多会让集群状态膨胀、单分片过大则恢复变慢。这些结论不依赖测量，也不受本机规模影响。"
-            },
-            {
-              "type": "p",
-              "text": "要真的量化分片影响，需要：同一份 Mapping、同一个分词器、只改分片数、多轮采样取中位数、并且数据量足够大到让分片成为瓶颈。这四条缺一条，结论就不可信。"
+              "text": "规划口径是「单分片 10–50GB」：20 万文档 60MB 用一个分片就够，2 亿文档 60GB 才需要 2–6 个。按「数据量 ÷ 30GB」起步，而不是按「节点数 × 2」拍脑袋。分片数定了不能改，只能 reindex。"
             }
           ],
-          "pitfall": "单节点集群设 number_of_replicas=1：副本分片永远 unassigned，集群一直 yellow，还会让人误判成故障。",
+          "pitfall": "拿两个同时改了四件事的索引做对比，然后把差异全部归给分片数。要谈某个变量的影响，就必须让其它变量保持一致。",
           "steps": [
             {
               "label": "运行本关",
-              "desc": "对比 v1（1 分片）与 v2（3 分片）的体积、段数、同一查询的中位数",
+              "desc": "建 shard1 / shard3 受控索引（同 mapping 同数据），四组各采多轮取中位数",
               "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "看 shard3 的三个分片各分到多少文档",
+              "kind": "console",
+              "method": "GET",
+              "path": "/_cat/shards/eslab-goods-shard3?v"
             }
           ],
           "probes": [
             {
-              "task": "把两个索引的分片数、文档数、体积、段数摆在一起",
+              "task": "看受控索引的分片落点",
               "method": "GET",
-              "path": "/_cat/indices/eslab-products-*?format=json&h=index,pri,rep,docs.count,store.size,segments.count",
-              "watch": "v1 与 v2 的分片数、体积差异",
-              "expect": "v1 是 1 分片、v2 是 3 分片，v2 体积更小（显式类型 + 正确的 keyword 避免了分词造成的膨胀）。同一份数据，只改设计，体积就能差 40%。"
+              "path": "/_cat/shards/eslab-goods-shard3?v",
+              "watch": "分片数、每片文档数、是否都在同一节点",
+              "expect": "3 个分片（0/1/2）都在 node-1 上，文档数近似均分。单节点没有副本，所以每片都是 primaries"
             },
             {
-              "task": "看 v1 的索引设置",
+              "task": "确认两个受控索引只差分片数",
               "method": "GET",
-              "path": "/eslab-products-v1/_settings",
-              "watch": "number_of_shards、number_of_replicas",
-              "expect": "1 分片、0 副本。单节点上副本无处分配，设 1 只会让集群永远 yellow —— 这是新手最常踩的「假故障」。"
+              "path": "/eslab-goods-shard1,eslab-goods-shard3/_settings?filter_path=**.number_of_shards,**.number_of_replicas",
+              "watch": "两份 settings 的差异",
+              "expect": "只有 number_of_shards 不同（1 vs 3），副本都是 0 —— 这就是「受控」的含义"
             },
             {
-              "task": "看 v2 的索引设置",
+              "task": "看两组的体积差",
               "method": "GET",
-              "path": "/eslab-products-v2/_settings",
-              "watch": "分片数与副本数",
-              "expect": "3 分片、0 副本。3 分片在单机小数据量下并不更快（并行收益被固定开销抵消），它的意义是演示「分片是并行度单位，也是开销单位」—— 生产按单分片 10–50GB 规划。"
+              "path": "/_cat/indices/eslab-goods-shard1,eslab-goods-shard3?h=index,docs.count,store.size,segments.count",
+              "watch": "体积与段数是否接近",
+              "expect": "体积接近（同一批文档），但段数与每片段大小不同 —— 分片数改变的是数据切分方式，不改变数据本身"
             }
           ],
-          "takeaway": "分片数按「单分片 10–50GB」倒推，同时留出增长余量与 reindex 的成本",
+          "takeaway": "分片数是并行度也是开销；本规模看不出差异是正常结论；要归因就做受控实验，只改一个变量。",
           "next": "m7-2",
           "prereq": {
             "cluster": true,
@@ -3756,75 +5173,116 @@
         {
           "id": "m7-2",
           "title": "优化实验台：把直觉变成数据",
-          "objective": "把前面所有直觉变成可复现的 A/B 数据，并学会读口径边界",
-          "hook": "「我觉得会更快」不是优化，A/B 实测才是。",
-          "predict": "四个实验里，哪个的「提速倍数」最可能被口径放大？",
-          "brief": "四个实验都基于同一份实验数据：①深分页 from+size vs search_after；②filter vs must 与 request cache；③v1 动态映射 vs v2 显式映射（顺带暴露召回差异）；④批量导入 refresh 策略。每个实验给中位数、样本值、结论与 caveat。",
+          "objective": "把四个 A/B 实验统一到同一套计量口径，并分清性能指标与正确性指标",
+          "hook": "四个实验各跑各的：有的 3 轮有的 5 轮，有的预热有的不预热，有的先跑 A 再跑 B —— 这样得到的「快 2 倍」互相之间不可比。",
+          "predict": "先猜：同一台机器上，先连续跑 5 次 A 再连续跑 5 次 B，与交替跑 A/B，结论会一样吗？",
+          "brief": "本关是实验台的入口页：列出当前数据基线，并说明四个实验现在共用的口径 —— 每侧 5 轮正式样本 + 1 轮预热、A/B 交替执行、报告给中位数/最小值/P95/全样本。",
           "deep": [
             {
               "type": "p",
-              "text": "这一关的实验台把 4 个 A/B 对照放在一起，但它们的数字要分开看：有的结论稳健，有的只是「本规模下看不出」。"
+              "text": "A/B 对比最常见的错误不是「测得不准」，是「两组测的条件不一样」。先跑完 A 的全部样本再跑 B，B 一定更占便宜：页缓存已经热了、连接池已经建好、JIT 已经编译过。结论于是变成「B 更快」，而真正的原因是「B 排在后面」。"
             },
             {
               "type": "h",
-              "text": "怎么读这四组数字"
+              "text": "统一到一套口径"
             },
             {
-              "type": "ul",
-              "items": [
-                "深分页：机制清楚（分片要取 from+size 条），但本机数据量下耗时差异可能落在噪声里",
-                "filter vs must：命中数相同、排序相同，差异只在「要不要算分」，小规模不可测",
-                "v1 vs v2：同时变了分片、Mapping、分词器、doc_values —— 与 m7-1 同样的问题",
-                "refresh_interval：「写完多久能搜到」这个结论是确定的，耗时的绝对值不稳定"
+              "type": "table",
+              "columns": [
+                "项目",
+                "统一做法",
+                "为什么"
+              ],
+              "rows": [
+                [
+                  "轮次",
+                  "每侧 5 轮",
+                  "样本太少，中位数就是某一次的运气"
+                ],
+                [
+                  "预热",
+                  "每侧先跑 1 轮并丢弃",
+                  "第一轮包含解析、连接、JIT 成本"
+                ],
+                [
+                  "顺序",
+                  "奇数轮先 A、偶数轮先 B",
+                  "抵消「后跑的更热」这类系统性漂移"
+                ],
+                [
+                  "统计量",
+                  "中位数 + 最小值 + P95 + 全样本",
+                  "中位数抗抖动，P95 暴露长尾，全样本让人自己复核"
+                ],
+                [
+                  "结论",
+                  "带噪声阈值与 caveat",
+                  "差值落在噪声内就说「持平」，不硬编故事"
+                ]
               ]
             },
             {
+              "type": "figure",
+              "kind": "refresh-timeline",
+              "caption": "预热轮与正式轮分开计；交替顺序让两组经历同样的环境变化"
+            },
+            {
               "type": "p",
-              "text": "读这类实验的正确姿势：先看**结论的因果链是否闭合**（改的变量是不是只有一个），再看**数字的相对关系是否稳定**（多跑几次会不会翻转），最后才看绝对值。"
+              "text": "四个实验（深分页、filter vs must、v1 vs v2、refresh_interval）现在都走同一套 `Timing.pair`：预热 → 交替采样 → 汇总。所以它们的数字之间可以横向比较。"
+            },
+            {
+              "type": "h",
+              "text": "性能与正确性必须分开"
+            },
+            {
+              "type": "p",
+              "text": "每个实验同时报告结构指标（命中数、文档数、是否有报错）与耗时。只有在命中集相同的前提下，耗时差异才有意义 —— 一个「快了 10 倍」但少召回一半的查询不是优化，是 bug。"
             },
             {
               "type": "callout",
-              "tone": "warn",
-              "text": "实验台给出的每个数字都带上下文：数据量、分片数、单节点。把它们抄到别处当基准值，是最常见的误用。",
-              "title": "数字有边界"
-            },
-            {
-              "type": "p",
-              "text": "真正的收获不是记住哪个更快，而是学会问：「这个差异，是哪个变量造成的？换一个数据量还成立吗？」这两个问题能过滤掉大部分看似专业的性能结论。"
+              "tone": "info",
+              "text": "噪声判断的阈值：本机单次 took 抖动可到 ±5ms。差值在这之内一律写「持平/本环境未观察到差异」，这比编一个漂亮倍率诚实得多，也更接近生产上做决策时的真实处境。"
             }
           ],
-          "pitfall": "把本机小数据量的结论直接搬到生产：几万文档、几十 MB 的索引，几乎所有查询都在页缓存里，测不出 IO 与并发的影响。",
+          "pitfall": "把「先后跑」的差值当变量效果。先跑 A 后跑 B，B 天然占便宜；不交替，就等于测「顺序」而不是测「方案」。",
           "steps": [
             {
               "label": "运行本关",
-              "desc": "查看当前数据基线与四个实验入口",
+              "desc": "看当前数据基线与四个实验的统一口径说明",
               "kind": "level"
+            },
+            {
+              "label": "自己在控制台验证",
+              "desc": "看 v2 此刻的文档数与段数，作为实验基线",
+              "kind": "console",
+              "method": "GET",
+              "path": "/eslab-products-v2/_count"
             }
           ],
           "probes": [
             {
-              "task": "确认当前数据基线",
+              "task": "看实验基线文档数",
               "method": "GET",
-              "path": "/_cat/indices/eslab-products-*?format=json&h=index,pri,docs.count,store.size,segments.count",
-              "watch": "文档数、体积、段数是否与上次实验一致",
-              "expect": "两条索引各 20 万文档（若你跑过 quick 档则是 2 万）。任何 A/B 结论都必须标注这个基线 —— 换数据量后结论可能反转。"
+              "path": "/eslab-products-v2/_count",
+              "watch": "count 是否与页面显示一致",
+              "expect": "如果不一致，说明索引被重建过 —— 历史实验结论不再可比"
             },
             {
-              "task": "看 JVM 堆占用",
+              "task": "看四个实验共用的数据基线索引",
               "method": "GET",
-              "path": "/_nodes/stats/jvm",
-              "watch": "heap_used_percent",
-              "expect": "堆占用通常在 20–40%。如果逼近 75%，先怀疑 fielddata、聚合桶过大、或分片过多，而不是加内存。"
+              "path": "/_cat/indices/eslab-products-v2?v",
+              "watch": "文档数、体积、段数",
+              "expect": "200000 条、约 63MB、若干段。这就是四个实验共同的分母；数字变了，历史实验结论就不再可比"
             },
             {
-              "task": "看 request cache 的命中情况",
+              "task": "看实验索引的规模",
               "method": "GET",
-              "path": "/eslab-products-v2/_stats/request_cache",
-              "watch": "hit_count、miss_count、evictions",
-              "expect": "命中数通常很低。缓存不是「开了就生效」：查询体必须完全一致，且只对 size=0 / 聚合类请求有效。实验前先确认缓存状态，否则测出来的差异可能来自缓存而不是你的优化。"
+              "path": "/_cat/indices/eslab-*?h=index,docs.count,store.size&s=index",
+              "watch": "各索引文档数与体积",
+              "expect": "受控分片实验的两个索引各有 2 万条，其余实验索引按需生成 —— 都是可重建的"
             }
           ],
-          "takeaway": "任何「快 N 倍」都要先问：两边测的是不是同一件事",
+          "takeaway": "可比性来自统一口径：同轮次、同预热、交替顺序、同统计量；性能结论必须附命中集是否相同。",
           "next": "m8-1",
           "prereq": {
             "cluster": true,
@@ -6573,7 +8031,7 @@
             }
           ],
           "takeaway": "入库前的清洗与补算应当是一份可测试、可复用的 pipeline，而不是散在各写入方的代码",
-          "next": null,
+          "next": "",
           "prereq": {
             "cluster": true,
             "indices": [],

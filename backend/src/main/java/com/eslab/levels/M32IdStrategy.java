@@ -76,7 +76,7 @@ public class M32IdStrategy implements LevelModule {
         long[] autoTimeDelta = new long[1];
         long[] autoDocsDelta = new long[1];
 
-        Timing.Sample autoSample = Timing.sample(1, 1, round -> {
+        Timing.Sample autoSample = Timing.sample(5, 1, round -> {
             deleteIndex(IDX_AUTO);
             es.put("/" + IDX_AUTO, DEF);
             IndexStats a0 = indexStats(IDX_AUTO);
@@ -94,16 +94,19 @@ public class M32IdStrategy implements LevelModule {
                 autoTimeDelta[0] = a1.timeMs() - a0.timeMs();
                 autoDocsDelta[0] = a1.total() - a0.total();
             }
-            return (double) (a1.timeMs() - a0.timeMs()) / Math.max(1L, a1.total() - a0.total());
+            // 用墙钟算每文档耗时：index_time_in_millis 是整数毫秒，3000 条会被四舍五入成 0
+            // 用「每千文档毫秒」而不是「每文档毫秒」：Sample 的统计量保留 1 位小数，
+            // 3000 条只花 60ms 时单条是 0.02ms，会被舍成 0.0，整列样本失去意义。
+            return autoWall * 1000.0 / Math.max(1L, a1.total() - a0.total());
         });
-        double autoMsPerDoc = autoSample.runs().get(0);
+        double autoMsPerDoc = autoSample.median();
 
         // ── B：业务自定义 _id ──
         double[] bizWallMs = new double[1];
         long[] bizTimeDelta = new long[1];
         long[] bizDocsDelta = new long[1];
 
-        Timing.Sample bizSample = Timing.sample(1, 1, round -> {
+        Timing.Sample bizSample = Timing.sample(5, 1, round -> {
             deleteIndex(IDX_BIZ);
             es.put("/" + IDX_BIZ, DEF);
             IndexStats b0 = indexStats(IDX_BIZ);
@@ -121,9 +124,9 @@ public class M32IdStrategy implements LevelModule {
                 bizTimeDelta[0] = b1.timeMs() - b0.timeMs();
                 bizDocsDelta[0] = b1.total() - b0.total();
             }
-            return (double) (b1.timeMs() - b0.timeMs()) / Math.max(1L, b1.total() - b0.total());
+            return bizWall * 1000.0 / Math.max(1L, b1.total() - b0.total());
         });
-        double bizMsPerDoc = bizSample.runs().get(0);
+        double bizMsPerDoc = bizSample.median();
 
         deleteIndex(IDX_AUTO);
         deleteIndex(IDX_BIZ);
@@ -136,19 +139,19 @@ public class M32IdStrategy implements LevelModule {
                 : "两者基本持平（" + String.format("%.2f", ratio)
                 + "×）——本规模下查重开销被其它成本掩盖了，\"业务 _id 一定更慢\"需要更大数据量才能验证";
 
-        return LevelResult.builder("同样 " + N + " 条：自动 _id 每文档 "
-                        + String.format("%.3f", autoMsPerDoc) + "ms，业务 _id 每文档 "
-                        + String.format("%.3f", bizMsPerDoc) + "ms，" + verdict)
+        return LevelResult.builder("同样 " + N + " 条：自动 _id 每千文档 "
+                        + String.format("%.1f", autoMsPerDoc) + "ms，业务 _id 每千文档 "
+                        + String.format("%.1f", bizMsPerDoc) + "ms，" + verdict)
                 .metrics(
-                        new Metric("自动 _id", String.format("%.3f", autoMsPerDoc) + " ms/文档",
+                        new Metric("自动 _id", String.format("%.1f", autoMsPerDoc) + " ms/千文档",
                                 "总墙钟 " + Math.round(autoWallMs[0]) + "ms"),
-                        new Metric("业务 _id", String.format("%.3f", bizMsPerDoc) + " ms/文档",
+                        new Metric("业务 _id", String.format("%.1f", bizMsPerDoc) + " ms/千文档",
                                 "总墙钟 " + Math.round(bizWallMs[0]) + "ms"),
-                        new Metric("差距", String.format("%.1f", ratio) + "×", "数据量越大差距越明显"),
-                        new Metric("样本量", N, null))
-                .chart(BarChartData.of("ms/文档", null,
-                        new BarChartData.Item("自动 _id（append-only）", Timing.round(autoMsPerDoc, 3)),
-                        new BarChartData.Item("业务 _id（需查重）", Timing.round(bizMsPerDoc, 3))))
+                        new Metric("差距", String.format("%.2f", ratio) + "×", "本规模下的倍数，不外推到其它规模"),
+                        new Metric("每组正式样本", 5, "另丢弃 1 轮预热"))
+                .chart(BarChartData.of("ms/千文档", null,
+                        new BarChartData.Item("自动 _id（append-only）", Timing.round(autoMsPerDoc, 1)),
+                        new BarChartData.Item("业务 _id（需查重）", Timing.round(bizMsPerDoc, 1))))
                 .json(Json.map(
                         "auto", Json.map(
                                 "wallMs", Math.round(autoWallMs[0]),
@@ -159,10 +162,10 @@ public class M32IdStrategy implements LevelModule {
                                 "indexTimeDelta", bizTimeDelta[0],
                                 "docs", bizDocsDelta[0])))
                 .notes(
-                        "口径说明：index_time_in_millis 是**墙钟时间**（含等待 IO 与 Lucene 内部锁），不是 CPU 时间；正因为含阻塞，它才适合衡量\"写一条要多久\"。",
+                        "口径说明：耗时 = 该轮 bulk 的**墙钟时间** ÷ 实际写入条数 × 1000，单位是「每千文档毫秒」。之所以不用每文档毫秒，是因为 3000 条只花几十毫秒，单条 0.02ms 在保留 1 位小数后全变成 0.0。",
                         "自动 id 的代价：放弃\"同一个 _id 覆盖更新\"的幂等能力。订单、商品这类需要按业务主键去重的场景，仍然应该用业务 _id。",
                         "折中方案：自动 _id + 业务主键做唯一约束（用一条独立的去重索引或外部存储），把查重从热路径挪走。",
-                        "本关文档数固定 3000，比率会随数据规模变化；想验证\"规模放大后差距更大\"，可把 N 改大后重跑（代码在 m3-2.ts）。")
+                        "本关文档数固定 3000，比率会随数据规模变化；小规模下没有显著差异时不能外推为普遍性能结论。")
                 .build();
     }
 

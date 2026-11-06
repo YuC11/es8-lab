@@ -47,8 +47,10 @@ public class ExpDeepPaging implements ExperimentModule {
 
     @Override
     public ExperimentResult run() throws Exception {
-        Timing.Sample a = Timing.sample(5, 1, round -> byFromSize());
-        Timing.Sample b = Timing.sample(3, 1, round -> bySearchAfter());
+        // 两侧同口径：5 轮正式样本 + 1 轮预热，A/B 交替执行
+        Timing.Pair pair = Timing.pair(5, 1, round -> byFromSize(), round -> bySearchAfter());
+        Timing.Sample a = pair.a();
+        Timing.Sample b = pair.b();
         Timing.Compare cmp = Timing.compare(a, b);
 
         double perPage = b.median() / 10;

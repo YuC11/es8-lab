@@ -246,6 +246,32 @@ public final class Probe {
             return out;
         }
 
+        // ── _mget：docs 数组，缺失的条目 found=false ──
+        if (d.path("docs").isArray()) {
+            int found = 0;
+            List<String> missing = new ArrayList<>();
+            for (JsonNode doc : d.path("docs")) {
+                if (doc.path("found").asBoolean(false)) found++;
+                else missing.add(doc.path("_id").asText("?"));
+            }
+            facts.add("请求 " + d.path("docs").size() + " 条 · 命中 " + found
+                    + (missing.isEmpty() ? "" : " · 缺失 " + String.join(",", missing)));
+            facts.add("缺失的 id 返回 found=false，不是 404 —— 只有索引不存在才会整体报错");
+            return out;
+        }
+
+        // ── _explain：单文档诊断，matched + explanation.value ──
+        if (d.has("matched") && d.has("explanation")) {
+            boolean matched = d.path("matched").asBoolean(false);
+            JsonNode root = d.path("explanation");
+            facts.add((matched ? "匹配" : "不匹配") + " · score "
+                    + String.format("%.2f", root.path("value").asDouble(0)));
+            String desc = root.path("description").asText("");
+            if (!desc.isBlank()) facts.add(truncate(desc, 110));
+            facts.add("explain 只解释这一篇文档，不能用来测吞吐");
+            return out;
+        }
+
         // ── search ──
         JsonNode hits = d.path("hits");
         if (hits.isObject()) {
