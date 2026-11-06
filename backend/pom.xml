@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.5</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.eslab</groupId>
+  <artifactId>es-lab</artifactId>
+  <version>1.0.0</version>
+  <name>es-lab</name>
+  <description>Elasticsearch 学习实验室（本地单节点）</description>
+
+  <properties>
+    <java.version>21</java.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <!-- ES 官方 Java 客户端：版本与本机 Elasticsearch 服务端（8.18.5）保持一致 -->
+    <dependency>
+      <groupId>co.elastic.clients</groupId>
+      <artifactId>elasticsearch-java</artifactId>
+      <version>8.18.5</version>
+    </dependency>
+    <!-- Jackson：显式统一版本（与 Spring Boot 3.3.5 BOM 管理的一致，避免与 ES 客户端传递依赖漂移） -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

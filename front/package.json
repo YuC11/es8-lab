@@ -1,0 +1,24 @@
+{
+  "name": "es-lab-front",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ES Lab 前端：React 18 + Vite 6 + TypeScript。构建产物 front/dist 由后端 backend/ 托管。",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
