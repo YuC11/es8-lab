@@ -1,5 +1,6 @@
 package com.eslab.levels;
 
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -27,28 +28,17 @@ import java.util.Map;
 @Component
 public class M31BulkWrite implements LevelModule {
 
-    private static final String INDEX = "eslab-demo-write";
+    private static final String INDEX = LabIndexes.DEMO_WRITE;
     private static final int N = 300;
 
-    private static final Map<String, Object> DEF = Json.map(
-            "settings", Json.map(
-                    "number_of_shards", 1,
-                    "number_of_replicas", 0,
-                    "refresh_interval", "-1"),
-            "mappings", Json.map(
-                    "properties", Json.map(
-                            "sku", Json.map("type", "keyword"),
-                            "title", Json.map("type", "text", "analyzer", "ik_max_word"),
-                            "price", Json.map("type", "scaled_float", "scaling_factor", 100),
-                            "category", Json.map("type", "keyword"),
-                            "tags", Json.map("type", "keyword"))));
-
     private final EsClient es;
+    private final LabIndexes indexes;
     private final ObjectMapper mapper;
 
-    public M31BulkWrite(EsClient es, ObjectMapper mapper) {
+    public M31BulkWrite(EsClient es, ObjectMapper mapper, LabIndexes indexes) {
         this.es = es;
         this.mapper = mapper;
+        this.indexes = indexes;
     }
 
     @Override
@@ -73,7 +63,7 @@ public class M31BulkWrite implements LevelModule {
         // TS 版是单次墙钟测量；这里保持 1 轮正式采样，另加 1 轮预热（预热轮丢弃，不计入结果）。
         Timing.Sample singleSample = Timing.sample(1, 1, round -> {
             deleteIndex();
-            es.put("/" + INDEX, DEF);
+            es.put("/" + INDEX, indexes.definitionOf(INDEX));
             long t1 = System.nanoTime();
 
             // @focus-start 每条文档一次 HTTP 往返（这就是 N+1 的写入版）
@@ -92,7 +82,7 @@ public class M31BulkWrite implements LevelModule {
 
         Timing.Sample bulkSample = Timing.sample(1, 1, round -> {
             deleteIndex();
-            es.put("/" + INDEX, DEF);
+            es.put("/" + INDEX, indexes.definitionOf(INDEX));
             long t2 = System.nanoTime();
 
             // @focus-start 一次请求带 N 条，NDJSON：action 行 + source 行交替

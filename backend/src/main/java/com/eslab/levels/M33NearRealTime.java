@@ -1,5 +1,6 @@
 package com.eslab.levels;
 
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -24,14 +25,16 @@ import java.util.Map;
 @Component
 public class M33NearRealTime implements LevelModule {
 
-    private static final String INDEX = "eslab-demo-refresh";
+    private static final String INDEX = LabIndexes.DEMO_REFRESH;
 
     private final EsClient es;
+    private final LabIndexes indexes;
     private final ObjectMapper mapper;
 
-    public M33NearRealTime(EsClient es, ObjectMapper mapper) {
+    public M33NearRealTime(EsClient es, ObjectMapper mapper, LabIndexes indexes) {
         this.es = es;
         this.mapper = mapper;
+        this.indexes = indexes;
     }
 
     @Override
@@ -42,15 +45,7 @@ public class M33NearRealTime implements LevelModule {
     @Override
     public LevelResult run() throws Exception {
         deleteIndex();
-        es.put("/" + INDEX, Json.map(
-                "settings", Json.map(
-                        "number_of_shards", 1,
-                        "number_of_replicas", 0,
-                        "refresh_interval", "1s"),
-                "mappings", Json.map(
-                        "properties", Json.map(
-                                "sku", Json.map("type", "keyword"),
-                                "title", Json.map("type", "text", "analyzer", "ik_max_word")))));
+        es.put("/" + INDEX, indexes.definitionOf(INDEX));
 
         // @focus-start 写入后立刻查：refresh=false 时不保证可见
         es.post("/" + INDEX + "/_doc", Json.map(

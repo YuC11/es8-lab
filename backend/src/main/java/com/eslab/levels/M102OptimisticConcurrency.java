@@ -1,6 +1,7 @@
 package com.eslab.levels;
 
 import com.eslab.levels.support.LabData;
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -29,7 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Component
 public class M102OptimisticConcurrency implements LevelModule {
 
-    private static final String OPS = LabData.OPS;
+    private static final String OPS = LabIndexes.OPS;
     private static final String ID = "ops-2";
 
     private final EsClient es;

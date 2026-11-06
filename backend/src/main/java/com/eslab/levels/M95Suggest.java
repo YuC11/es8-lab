@@ -1,6 +1,7 @@
 package com.eslab.levels;
 
 import com.eslab.levels.support.LabData;
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.Json;
 import com.eslab.model.LevelModule;
@@ -26,7 +27,7 @@ import java.util.Map;
 @Component
 public class M95Suggest implements LevelModule {
 
-    private static final String SEARCH = LabData.SEARCH;
+    private static final String SEARCH = LabIndexes.SEARCH;
 
     private final EsClient es;
     private final LabData lab;

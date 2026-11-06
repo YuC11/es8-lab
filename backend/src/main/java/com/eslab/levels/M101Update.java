@@ -1,6 +1,7 @@
 package com.eslab.levels;
 
 import com.eslab.levels.support.LabData;
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.Json;
 import com.eslab.model.LevelModule;
@@ -23,7 +24,7 @@ import java.util.Map;
 @Component
 public class M101Update implements LevelModule {
 
-    private static final String OPS = LabData.OPS;
+    private static final String OPS = LabIndexes.OPS;
 
     private final EsClient es;
     private final LabData lab;

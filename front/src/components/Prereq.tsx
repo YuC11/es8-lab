@@ -85,7 +85,29 @@ export default function PrereqBanner({
   data: DataState | null;
 }) {
   const r = checkPrereq(prereq, health, data);
-  if (r.ok) return null;
+  const creates = prereq?.creates ?? [];
+  const noIndices = (prereq?.indices ?? []).length === 0;
+
+  if (r.ok) {
+    // 完全没有索引前置、但本关会自己建东西：说明一句，省得学员到处找「要先建什么」
+    if (creates.length === 0 || !noIndices) return null;
+    return (
+      <div className="callout info prereq">
+        <span className="tag">本关自建</span>
+        <div style={{ flex: 1 }}>
+          <div>{prereq?.text ?? '这一关不需要提前准备数据'}</div>
+          <div className="prereq-actions">
+            {creates.map((c) => (
+              <code className="prereq-create" key={c}>
+                {c}
+              </code>
+            ))}
+            <span className="prereq-hint">运行本关时自动创建或重建，不用手动准备</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="callout error prereq">

@@ -6,6 +6,7 @@ import type {
   IndexState,
   JobView,
   Knowledge,
+  LabIndexesState,
   LevelResult,
   SourceInfo,
 } from './types';
@@ -35,6 +36,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const getHealth = () => request<Health>('/api/health');
 export const getFields = () => request<FieldDict>('/api/data/fields');
 export const getKnowledge = () => request<Knowledge>('/api/knowledge');
+/** 注册表视角的索引总览：登记信息（生命周期/归属/目标条数）+ 实时状态 */
+export const getLabIndexes = () => request<LabIndexesState>('/api/lab/indexes');
 
 export interface LevelRunResponse {
   ok: boolean;

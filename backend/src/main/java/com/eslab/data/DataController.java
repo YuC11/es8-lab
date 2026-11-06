@@ -106,13 +106,17 @@ public class DataController {
             }
             // 已经够了就不重复灌：重复执行必须幂等，否则学员多点两次就变成 4 万条
             long existing = dataset.count(index);
+            if (existing < 0) {
+                return ResponseEntity.status(500)
+                        .body(Map.of("ok", false, "error", "读不到 " + index + " 的文档数，稍后重试"));
+            }
             if (existing >= target) {
                 return ResponseEntity.ok(Map.of(
                         "ok", true, "skipped", true,
                         "docs", existing,
                         "message", "已有 " + existing + " 条，达到或超过目标 " + target + "，跳过写入"));
             }
-            int startFrom = (int) Math.max(0, existing);
+            int startFrom = (int) existing;
             int remaining = (int) (target - existing);
             JobRegistry.Job job = jobs.submit("bulk:" + index, remaining, j -> {
                 DatasetService.BulkOutcome o = dataset.bulkLoad(index, remaining, startFrom, j::progress);

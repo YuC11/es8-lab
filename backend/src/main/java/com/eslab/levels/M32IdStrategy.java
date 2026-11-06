@@ -1,5 +1,6 @@
 package com.eslab.levels;
 
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -28,30 +29,21 @@ import java.util.Map;
 @Component
 public class M32IdStrategy implements LevelModule {
 
-    private static final String IDX_AUTO = "eslab-demo-id-auto";
-    private static final String IDX_BIZ = "eslab-demo-id-biz";
+    private static final String IDX_AUTO = LabIndexes.DEMO_ID_AUTO;
+    private static final String IDX_BIZ = LabIndexes.DEMO_ID_BIZ;
     private static final int N = 3000;
-
-    private static final Map<String, Object> DEF = Json.map(
-            "settings", Json.map(
-                    "number_of_shards", 1,
-                    "number_of_replicas", 0,
-                    "refresh_interval", "-1"),
-            "mappings", Json.map(
-                    "properties", Json.map(
-                            "sku", Json.map("type", "keyword"),
-                            "title", Json.map("type", "text", "analyzer", "ik_max_word"),
-                            "price", Json.map("type", "scaled_float", "scaling_factor", 100))));
 
     private record IndexStats(long timeMs, long total) {
     }
 
     private final EsClient es;
+    private final LabIndexes indexes;
     private final ObjectMapper mapper;
 
-    public M32IdStrategy(EsClient es, ObjectMapper mapper) {
+    public M32IdStrategy(EsClient es, ObjectMapper mapper, LabIndexes indexes) {
         this.es = es;
         this.mapper = mapper;
+        this.indexes = indexes;
     }
 
     @Override
@@ -78,7 +70,7 @@ public class M32IdStrategy implements LevelModule {
 
         Timing.Sample autoSample = Timing.sample(5, 1, round -> {
             deleteIndex(IDX_AUTO);
-            es.put("/" + IDX_AUTO, DEF);
+            es.put("/" + IDX_AUTO, indexes.definitionOf(IDX_AUTO));
             IndexStats a0 = indexStats(IDX_AUTO);
             long ta = System.nanoTime();
 
@@ -108,7 +100,7 @@ public class M32IdStrategy implements LevelModule {
 
         Timing.Sample bizSample = Timing.sample(5, 1, round -> {
             deleteIndex(IDX_BIZ);
-            es.put("/" + IDX_BIZ, DEF);
+            es.put("/" + IDX_BIZ, indexes.definitionOf(IDX_BIZ));
             IndexStats b0 = indexStats(IDX_BIZ);
             long tb = System.nanoTime();
 

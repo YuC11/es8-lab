@@ -3,6 +3,7 @@ import type { DataState, Health, Knowledge } from '../lib/types';
 import { goLevel } from '../lib/router';
 import { getLast, resetProgress } from '../lib/progress';
 import DataPanel from '../components/DataPanel';
+import LabIndexPanel from '../components/LabIndexPanel';
 
 interface Props {
   knowledge: Knowledge;
@@ -123,6 +124,8 @@ export default function Roadmap({ knowledge, health, data, progress, onDataChang
       </div>
 
       <DataPanel data={data} health={health} onChange={onDataChange} />
+
+      <LabIndexPanel />
 
       <div className="roadmap-chapters">
         {knowledge.modules.map((m) => {

@@ -1,5 +1,6 @@
 package com.eslab.levels;
 
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -23,12 +24,14 @@ import java.util.Map;
 @Component
 public class M14FieldExplosion implements LevelModule {
 
-    private static final String INDEX = "eslab-demo-explode";
+    private static final String INDEX = LabIndexes.DEMO_EXPLODE;
 
     private final EsClient es;
+    private final LabIndexes indexes;
 
-    public M14FieldExplosion(EsClient es) {
+    public M14FieldExplosion(EsClient es, LabIndexes indexes) {
         this.es = es;
+        this.indexes = indexes;
     }
 
     @Override
@@ -41,9 +44,7 @@ public class M14FieldExplosion implements LevelModule {
         deleteIndex();
 
         // @focus-start 反面教材：允许动态映射 + 把属性平铺成字段
-        es.put("/" + INDEX, Json.map(
-                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0),
-                "mappings", Json.map("dynamic", true)));
+        es.put("/" + INDEX, indexes.definitionOf(INDEX));
 
         int written = 0;
         List<List<Object>> rows = new ArrayList<>();

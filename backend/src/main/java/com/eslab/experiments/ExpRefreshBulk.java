@@ -1,5 +1,6 @@
 package com.eslab.experiments;
 
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -32,15 +33,17 @@ public class ExpRefreshBulk implements ExperimentModule {
     private static final int BATCH = 2_000;
     /** 每批之间停一下，让 refresh_interval=1s 的那一组真的经历几次刷新；两组都停，保证公平 */
     private static final long PAUSE_MS = 350;
-    private static final String ON = "eslab-demo-refresh-on";
-    private static final String OFF = "eslab-demo-refresh-off";
+    private static final String ON = LabIndexes.DEMO_REFRESH_ON;
+    private static final String OFF = LabIndexes.DEMO_REFRESH_OFF;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final EsClient es;
+    private final LabIndexes indexes;
 
-    public ExpRefreshBulk(EsClient es) {
+    public ExpRefreshBulk(EsClient es, LabIndexes indexes) {
         this.es = es;
+        this.indexes = indexes;
     }
 
     @Override
@@ -129,7 +132,7 @@ public class ExpRefreshBulk implements ExperimentModule {
         deleteIndexIfExists(name);
         try {
             // @focus-start 建索引时唯一的变量就是 refresh_interval
-            es.put("/" + name, definition(refresh));
+            es.put("/" + name, indexes.definitionOf(name));
             double ms = load(name, docs);
             // @focus-end
             es.post("/" + name + "/_refresh", null);
@@ -160,21 +163,6 @@ public class ExpRefreshBulk implements ExperimentModule {
             Thread.sleep(PAUSE_MS);
         }
         return total;
-    }
-
-    private static Map<String, Object> definition(String refresh) {
-        return Json.map(
-                "settings", Json.map(
-                        "number_of_shards", 1,
-                        "number_of_replicas", 0,
-                        "refresh_interval", refresh),
-                "mappings", Json.map(
-                        "properties", Json.map(
-                                "sku", Json.map("type", "keyword"),
-                                "title", Json.map("type", "text", "analyzer", "ik_max_word"),
-                                "price", Json.map("type", "scaled_float", "scaling_factor", 100),
-                                "category", Json.map("type", "keyword"),
-                                "tags", Json.map("type", "keyword"))));
     }
 
     private void deleteIndexIfExists(String index) {

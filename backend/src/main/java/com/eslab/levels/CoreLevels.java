@@ -2,6 +2,7 @@ package com.eslab.levels;
 
 import com.eslab.data.DatasetService;
 import com.eslab.levels.support.LabData;
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -52,7 +53,7 @@ public final class CoreLevels {
         }
 
         JsonNode search(Object body) {
-            return es.post("/" + LabData.CORE + "/_search", body);
+            return es.post("/" + LabIndexes.CORE + "/_search", body);
         }
 
         long total(JsonNode resp) {
@@ -81,11 +82,11 @@ public final class CoreLevels {
 
         public LevelResult run() {
             reset();
-            String doc = "/" + LabData.CORE + "/_doc/core-crud";
+            String doc = "/" + LabIndexes.CORE + "/_doc/core-crud";
 
             JsonNode created = es.put(doc, Json.map(
                     "sku", "CORE-CRUD", "title", "蓝牙耳机 CRUD 样例", "stock", 1, "price", 199));
-            JsonNode updated = es.post("/" + LabData.CORE + "/_update/core-crud",
+            JsonNode updated = es.post("/" + LabIndexes.CORE + "/_update/core-crud",
                     Json.map("doc", Json.map("stock", 2)));
             JsonNode merged = es.get(doc);
 
@@ -143,9 +144,9 @@ public final class CoreLevels {
 
         public LevelResult run() {
             reset();
-            JsonNode mapping = es.get("/" + LabData.CORE + "/_mapping");
-            JsonNode settings = es.get("/" + LabData.CORE + "/_settings");
-            JsonNode capsCore = es.post("/" + LabData.CORE + "/_field_caps",
+            JsonNode mapping = es.get("/" + LabIndexes.CORE + "/_mapping");
+            JsonNode settings = es.get("/" + LabIndexes.CORE + "/_settings");
+            JsonNode capsCore = es.post("/" + LabIndexes.CORE + "/_field_caps",
                     Json.map("fields", List.of("title", "price", "sku", "brand")));
             JsonNode capsV2 = es.post("/" + DatasetService.V2 + "/_field_caps",
                     Json.map("fields", List.of("title", "price")));
@@ -171,12 +172,12 @@ public final class CoreLevels {
             String v2Title = capsV2.path("fields").path("title").path("text").path("type").asText("?");
             String v2Price = capsV2.path("fields").path("price").path("scaled_float").path("type").asText("?");
 
-            JsonNode indexSettings = settings.path(LabData.CORE).path("settings").path("index");
-            return LevelResult.builder("核心样例索引有 " + mapping.path(LabData.CORE).path("mappings").path("properties").size()
+            JsonNode indexSettings = settings.path(LabIndexes.CORE).path("settings").path("index");
+            return LevelResult.builder("核心样例索引有 " + mapping.path(LabIndexes.CORE).path("mappings").path("properties").size()
                             + " 个字段、1 个分片；field_caps 能同时告出「类型 / 可搜索 / 可聚合」，"
                             + "而 v2 的 title 是 text、price 是 scaled_float —— 两份索引的同一字段能力并不相同")
                     .metrics(
-                            new Metric("显式字段数", mapping.path(LabData.CORE).path("mappings").path("properties").size(), "core 的定义是 strict"),
+                            new Metric("显式字段数", mapping.path(LabIndexes.CORE).path("mappings").path("properties").size(), "core 的定义是 strict"),
                             new Metric("分片 / 副本", indexSettings.path("number_of_shards").asText() + " / "
                                     + indexSettings.path("number_of_replicas").asText(), "分片数建库后不可改"),
                             new Metric("v2.title 类型", v2Title, "同一字段在两份索引里可以不同"),
@@ -205,7 +206,7 @@ public final class CoreLevels {
         public LevelResult run() {
             reset();
             String text = "蓝牙耳机 主动降噪";
-            JsonNode byField = es.post("/" + LabData.CORE + "/_analyze",
+            JsonNode byField = es.post("/" + LabIndexes.CORE + "/_analyze",
                     Json.map("field", "title", "text", text));
             JsonNode standard = es.post("/_analyze", Json.map("analyzer", "standard", "text", text));
 
@@ -257,17 +258,17 @@ public final class CoreLevels {
 
         public LevelResult run() {
             reset();
-            String first = "{\"create\":{\"_index\":\"" + LabData.CORE + "\",\"_id\":\"core-0\"}}\n"
+            String first = "{\"create\":{\"_index\":\"" + LabIndexes.CORE + "\",\"_id\":\"core-0\"}}\n"
                     + "{\"sku\":\"DUP\"}\n"
-                    + "{\"index\":{\"_index\":\"" + LabData.CORE + "\",\"_id\":\"bulk-new\"}}\n"
+                    + "{\"index\":{\"_index\":\"" + LabIndexes.CORE + "\",\"_id\":\"bulk-new\"}}\n"
                     + "{\"sku\":\"BULK-NEW\",\"title\":\"批量成功样例\",\"category\":\"数码影音\","
                     + "\"brand\":\"拾光\",\"price\":10,\"stock\":5,\"created_at\":\"2026-02-01\"}\n";
             JsonNode round1 = es.bulk(first, 30_000);
 
             // 重放：把 create 换成 index —— 已存在不再报错，代价是覆盖原文档
-            String replay = "{\"index\":{\"_index\":\"" + LabData.CORE + "\",\"_id\":\"core-0\"}}\n"
+            String replay = "{\"index\":{\"_index\":\"" + LabIndexes.CORE + "\",\"_id\":\"core-0\"}}\n"
                     + "{\"sku\":\"DUP\"}\n"
-                    + "{\"index\":{\"_index\":\"" + LabData.CORE + "\",\"_id\":\"bulk-new\"}}\n"
+                    + "{\"index\":{\"_index\":\"" + LabIndexes.CORE + "\",\"_id\":\"bulk-new\"}}\n"
                     + "{\"sku\":\"BULK-NEW\",\"title\":\"批量成功样例\",\"category\":\"数码影音\","
                     + "\"brand\":\"拾光\",\"price\":10,\"stock\":5,\"created_at\":\"2026-02-01\"}\n";
             JsonNode round2 = es.bulk(replay, 30_000);
@@ -277,8 +278,8 @@ public final class CoreLevels {
             rows.add(TableData.row("index bulk-new（新增）", itemStatus(round1, 1), itemStatus(round2, 1)));
 
             int conflictStatus = round1.path("items").get(0).path("create").path("status").asInt();
-            data.refresh(LabData.CORE);
-            long docs = data.count(LabData.CORE);
+            data.refresh(LabIndexes.CORE);
+            long docs = data.count(LabIndexes.CORE);
 
             return LevelResult.builder("第一轮 bulk 的 HTTP 是 200，但 errors=" + round1.path("errors").asBoolean()
                             + "：create 冲突的那条状态是 " + conflictStatus
@@ -384,12 +385,12 @@ public final class CoreLevels {
         public LevelResult run() {
             reset();
             // 第二个子请求故意对 text 字段排序：它会在自己的响应里报 400，不影响第一个
-            String nd = "{\"index\":\"" + LabData.CORE + "\"}\n"
+            String nd = "{\"index\":\"" + LabIndexes.CORE + "\"}\n"
                     + "{\"size\":0,\"track_total_hits\":true,\"query\":{\"term\":{\"category\":\"数码影音\"}}}\n"
-                    + "{\"index\":\"" + LabData.CORE + "\"}\n"
+                    + "{\"index\":\"" + LabIndexes.CORE + "\"}\n"
                     + "{\"size\":0,\"sort\":[{\"title\":\"asc\"}]}\n";
             JsonNode msearch = es.call("POST", "/_msearch", null, nd, 30_000).body();
-            JsonNode mget = es.post("/" + LabData.CORE + "/_mget",
+            JsonNode mget = es.post("/" + LabIndexes.CORE + "/_mget",
                     Json.map("ids", List.of("core-0", "core-1", "missing")));
 
             JsonNode ok = msearch.path("responses").get(0);
@@ -563,7 +564,7 @@ public final class CoreLevels {
             reset();
 
             // 路线 A：scroll
-            JsonNode first = es.post("/" + LabData.CORE + "/_search?scroll=1m",
+            JsonNode first = es.post("/" + LabIndexes.CORE + "/_search?scroll=1m",
                     Json.map("size", 10, "sort", List.of("_doc"), "query", Json.map("match_all", Json.map())));
             String scrollId = first.path("_scroll_id").asText();
             Set<String> scrollIds = new LinkedHashSet<>();
@@ -580,7 +581,7 @@ public final class CoreLevels {
                     Json.map("scroll_id", List.of(scrollId))).body();
 
             // 路线 B：PIT + search_after
-            JsonNode pit = es.post("/" + LabData.CORE + "/_pit?keep_alive=1m", null);
+            JsonNode pit = es.post("/" + LabIndexes.CORE + "/_pit?keep_alive=1m", null);
             String pitId = pit.path("id").asText();
             Set<String> pitIds = new LinkedHashSet<>();
             JsonNode after = null;
@@ -646,9 +647,9 @@ public final class CoreLevels {
             String id = hit.path("_id").asText();
             double searchScore = hit.path("_score").asDouble();
 
-            JsonNode byMatch = es.post("/" + LabData.CORE + "/_explain/" + id,
+            JsonNode byMatch = es.post("/" + LabIndexes.CORE + "/_explain/" + id,
                     Json.map("query", Json.map("match", Json.map("title", "蓝牙耳机"))));
-            JsonNode byTerm = es.post("/" + LabData.CORE + "/_explain/" + id,
+            JsonNode byTerm = es.post("/" + LabIndexes.CORE + "/_explain/" + id,
                     Json.map("query", Json.map("term", Json.map("title", "蓝牙耳机"))));
 
             double matchScore = byMatch.path("explanation").path("value").asDouble();

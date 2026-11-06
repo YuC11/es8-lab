@@ -15,7 +15,7 @@
 #   · 未带 --yes 时只做预览，不做任何删除
 #
 # 性能：索引按「整体删除」而非 _delete_by_query（后者要逐条标记删除，20 万文档是分钟级），
-#      多个索引用 4 并发删除，避免串行等待。
+#      逐个删除即可，十几个索引不到 1 秒。
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -92,6 +92,31 @@ es_reachable() {
 }
 
 # ── 1. ES 索引 ───────────────────────────────────────────────
+# 模板与 pipeline 没有索引实体，_cat/indices 看不到，必须单独清。
+# 顺序上先清资产再删索引：否则删完索引后模板还在，下一次建索引又会套上。
+clean_assets() {
+  local assets=(
+    "_index_template/eslab-goods-template"
+    "_ingest/pipeline/eslab-goods-enrich"
+  )
+  printf '  集群资产（模板 / 管道）：\n'
+  local a code
+  for a in "${assets[@]}"; do
+    if [ "$DRY" = "1" ]; then
+      printf '    - 将删除 %s\n' "$a"
+      log "will delete asset $a"
+      continue
+    fi
+    code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X DELETE -m 30 "$ES_URL/$a")
+    case "$code" in
+      200) green "    ✓ 已删除 $a"; log "deleted asset $a" ;;
+      404) dim   "    - 不存在 $a" ;;
+      *)   red   "    ✗ 删除失败 $a (HTTP $code)"; log "FAILED asset $a HTTP=$code" ;;
+    esac
+  done
+  return 0
+}
+
 clean_es() {
   cyan "[1/3] ES 索引"
   if ! es_reachable; then
@@ -102,6 +127,10 @@ clean_es() {
 
   local list
   list="$(curl --noproxy '*' -s -m 10 "$ES_URL/_cat/indices/${PREFIX}*?h=index,docs.count,store.size&format=json" | json_field index)"
+
+  # 模板与 pipeline 没有索引实体，_cat/indices 看不到，必须单独清 —— 且要在删索引之前清，
+  # 否则删完索引后模板还在，下一次建索引又会套上。
+  clean_assets
 
   if [ -z "$list" ]; then
     green "  没有 ${PREFIX}* 索引，无需清理"
@@ -137,20 +166,19 @@ clean_es() {
   started=$(node -e 'console.log(Date.now())')
   local failed=0
 
-  # 并发删除：索引删除是整体 unlink，单个通常 <50ms，并发只为减少等待
-  printf '%s\n' "${safe[@]}" | xargs -P "$PARALLEL" -I{} bash -c '
-    url="'"$ES_URL"'/{}"
-    code=$(curl --noproxy "*" -s -o /dev/null -w "%{http_code}" -X DELETE -m 60 "$url")
-    if [ "$code" = "200" ]; then echo "OK {}"; else echo "FAIL {} $code"; fi
-  ' | while read -r status idx code; do
-    if [ "$status" = "OK" ]; then
-      green "    ✓ 已删除 $idx"
-      log "deleted $idx"
-    else
-      red "    ✗ 删除失败 $idx (HTTP $code)"
-      log "FAILED $idx HTTP=$code"
-      failed=$((failed + 1))
-    fi
+  # 串行删除。索引删除是整体 unlink，单个通常 <50ms，十几个索引加起来不到 1 秒；
+  # 之前用 xargs -P 并发，在 macOS 的 BSD xargs 上会报
+  # "command line cannot be assembled, too long" 而一个都没删掉 —— 不值得为这点时间换可移植性。
+  local idx code
+  for idx in "${safe[@]}"; do
+    code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -X DELETE -m 60 "$ES_URL/$idx")
+    case "$code" in
+      200) green "    ✓ 已删除 $idx"; log "deleted $idx" ;;
+      404) dim   "    - 已不存在 $idx"; log "gone $idx" ;;
+      *)   red   "    ✗ 删除失败 $idx (HTTP $code)"
+           log "FAILED $idx HTTP=$code"
+           failed=$((failed + 1)) ;;
+    esac
   done
 
   # 删除后复核：确认没有残留

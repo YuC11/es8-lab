@@ -660,13 +660,11 @@
           "next": "m1-2",
           "prereq": {
             "cluster": true,
-            "indices": [
-              {
-                "index": "eslab-products-v1",
-                "minDocs": 1
-              }
-            ],
-            "text": "需要 v1 已建成（第 0 章）"
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关在 eslab-demo-auto 上演示动态映射，不碰 v1/v2",
+            "creates": [
+              "eslab-demo-auto"
+            ]
           }
         },
         {
@@ -1116,10 +1114,14 @@
             "indices": [
               {
                 "index": "eslab-products-v2",
-                "minDocs": 20000
+                "minDocs": 1,
+                "fixLevel": "m0-2"
               }
             ],
-            "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+            "text": "需要 v2 已建好（用来对照 dynamic:strict 的拒写）；本关自己建 eslab-demo-explode",
+            "creates": [
+              "eslab-demo-explode"
+            ]
           }
         },
         {
@@ -1399,10 +1401,14 @@
             "indices": [
               {
                 "index": "eslab-products-v2",
-                "minDocs": 20000
+                "minDocs": 1,
+                "fixLevel": "m0-2"
               }
             ],
-            "text": "需要 v2 已建成（m1-2），core 由本关自建；对照 v2 的字段类型用"
+            "text": "需要 v2 已建好（对照同名字段的类型与能力）；本关自己建 eslab-goods-core",
+            "creates": [
+              "eslab-goods-core"
+            ]
           }
         }
       ]
@@ -1948,13 +1954,11 @@
           "next": "m3-2",
           "prereq": {
             "cluster": true,
-            "indices": [
-              {
-                "index": "eslab-products-v2",
-                "minDocs": 20000
-              }
-            ],
-            "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关在 eslab-demo-write 上对比单条写与 bulk 写",
+            "creates": [
+              "eslab-demo-write"
+            ]
           }
         },
         {
@@ -2043,13 +2047,12 @@
           "next": "m3-3",
           "prereq": {
             "cluster": true,
-            "indices": [
-              {
-                "index": "eslab-products-v2",
-                "minDocs": 20000
-              }
-            ],
-            "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关在 eslab-demo-id-auto / -biz 上对比两种 _id 策略",
+            "creates": [
+              "eslab-demo-id-auto",
+              "eslab-demo-id-biz"
+            ]
           }
         },
         {
@@ -2162,13 +2165,11 @@
           "next": "m3-4",
           "prereq": {
             "cluster": true,
-            "indices": [
-              {
-                "index": "eslab-products-v2",
-                "minDocs": 20000
-              }
-            ],
-            "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+            "indices": [],
+            "text": "只需要 Elasticsearch 在线：本关在 eslab-demo-refresh 上观察近实时可见性",
+            "creates": [
+              "eslab-demo-refresh"
+            ]
           }
         },
         {
@@ -5163,11 +5164,19 @@
             "cluster": true,
             "indices": [
               {
+                "index": "eslab-products-v1",
+                "minDocs": 1
+              },
+              {
                 "index": "eslab-products-v2",
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有 2 万条数据（第 0 章 + m1-2）"
+            "text": "需要 v1 与 v2 都已建成（v1 用作整体设计对照，v2 是受控实验的数据源）；本关自己建 shard1 / shard3",
+            "creates": [
+              "eslab-goods-shard1",
+              "eslab-goods-shard3"
+            ]
           }
         },
         {
@@ -5455,7 +5464,11 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（本关从它 reindex 出 v3）",
+            "creates": [
+              "eslab-goods-v3",
+              "eslab-goods"
+            ]
           }
         },
         {
@@ -5600,7 +5613,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（本关造 v4 并切换别名）",
+            "creates": [
+              "eslab-goods-v4"
+            ]
           }
         },
         {
@@ -5714,7 +5730,11 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（本关造 v4 再异步搬进 v5）",
+            "creates": [
+              "eslab-goods-v5",
+              "eslab-goods-v4"
+            ]
           }
         },
         {
@@ -5846,7 +5866,11 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（本关造 v3 做段合并、造 live 系列做 rollover）",
+            "creates": [
+              "eslab-goods-v3",
+              "eslab-goods-live-000001"
+            ]
           }
         }
       ]
@@ -6044,7 +6068,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（第 9 章的关系性实验索引都从它派生）",
+            "creates": [
+              "eslab-goods-search"
+            ]
           }
         },
         {
@@ -6222,7 +6249,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（第 9 章的关系性实验索引都从它派生）",
+            "creates": [
+              "eslab-goods-search"
+            ]
           }
         },
         {
@@ -6441,7 +6471,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（第 9 章的关系性实验索引都从它派生）",
+            "creates": [
+              "eslab-goods-search"
+            ]
           }
         },
         {
@@ -6643,7 +6676,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（第 9 章的关系性实验索引都从它派生）",
+            "creates": [
+              "eslab-goods-search"
+            ]
           }
         },
         {
@@ -6820,7 +6856,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（第 9 章的关系性实验索引都从它派生）",
+            "creates": [
+              "eslab-goods-search"
+            ]
           }
         },
         {
@@ -6959,7 +6998,10 @@
                 "minDocs": 20000
               }
             ],
-            "text": "需要 v2 已建成且有数据（第 0 章 + m1-2）"
+            "text": "需要 v2 有数据（第 9 章的关系性实验索引都从它派生）",
+            "creates": [
+              "eslab-goods-v6"
+            ]
           }
         }
       ]
@@ -7125,7 +7167,10 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关会重建 eslab-goods-ops，只要求 ES 在线"
+            "text": "本关会重建 eslab-goods-ops（2000 条商品 + 10 条固定 id 运营文档），只要求 ES 在线",
+            "creates": [
+              "eslab-goods-ops"
+            ]
           }
         },
         {
@@ -7274,7 +7319,10 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关会重建 eslab-goods-ops，只要求 ES 在线"
+            "text": "本关会重建 eslab-goods-ops 并做并发自增，只要求 ES 在线",
+            "creates": [
+              "eslab-goods-ops"
+            ]
           }
         },
         {
@@ -7432,7 +7480,10 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关会重建 eslab-goods-ops，只要求 ES 在线"
+            "text": "本关会重建 eslab-goods-ops 并发一整个混合 bulk，只要求 ES 在线",
+            "creates": [
+              "eslab-goods-ops"
+            ]
           }
         },
         {
@@ -7577,7 +7628,10 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关会重建 eslab-goods-ops，只要求 ES 在线"
+            "text": "本关会重建 eslab-goods-ops 做 _delete_by_query，只要求 ES 在线",
+            "creates": [
+              "eslab-goods-ops"
+            ]
           }
         }
       ]
@@ -7718,7 +7772,11 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关自己创建 eslab-goods-tpl-* 索引，只要求 ES 在线"
+            "text": "本关自己建模板与 eslab-goods-tpl-2026，只要求 ES 在线",
+            "creates": [
+              "eslab-goods-tpl-2026",
+              "模板 eslab-goods-template"
+            ]
           }
         },
         {
@@ -7867,7 +7925,11 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关自己创建 eslab-goods-dyn* 索引，只要求 ES 在线"
+            "text": "本关自己建 eslab-goods-dyn / -dyn-ctrl，只要求 ES 在线",
+            "creates": [
+              "eslab-goods-dyn",
+              "eslab-goods-dyn-ctrl"
+            ]
           }
         },
         {
@@ -8035,7 +8097,11 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关自己创建 eslab-goods-ingest 索引，只要求 ES 在线"
+            "text": "本关自己建 pipeline 与 eslab-goods-ingest，只要求 ES 在线",
+            "creates": [
+              "eslab-goods-ingest",
+              "pipeline eslab-goods-enrich"
+            ]
           }
         }
       ]

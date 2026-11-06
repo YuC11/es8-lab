@@ -1,5 +1,6 @@
 package com.eslab.levels;
 
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
@@ -23,12 +24,14 @@ import java.util.Map;
 @Component
 public class M11DynamicMapping implements LevelModule {
 
-    private static final String INDEX = "eslab-demo-auto";
+    private static final String INDEX = LabIndexes.DEMO_AUTO;
 
     private final EsClient es;
+    private final LabIndexes indexes;
 
-    public M11DynamicMapping(EsClient es) {
+    public M11DynamicMapping(EsClient es, LabIndexes indexes) {
         this.es = es;
+        this.indexes = indexes;
     }
 
     @Override
@@ -41,8 +44,7 @@ public class M11DynamicMapping implements LevelModule {
         deleteIndex();
 
         // @focus-start 建索引：只给分片数、不给 mappings —— 字段类型交给 ES 猜
-        es.put("/" + INDEX, Json.map(
-                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0)));
+        es.put("/" + INDEX, indexes.definitionOf(INDEX));
         // @focus-end
 
         // @focus-start 写入两条结构一致的商品：第 2 条的 price 传成了字符串，tags 传成了单值

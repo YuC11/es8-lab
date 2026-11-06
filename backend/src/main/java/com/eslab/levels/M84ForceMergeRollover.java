@@ -1,6 +1,7 @@
 package com.eslab.levels;
 
 import com.eslab.levels.support.LabData;
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.model.LevelModule;
 import com.eslab.model.LevelResult;
@@ -40,41 +41,34 @@ public class M84ForceMergeRollover implements LevelModule {
 
     @Override
     public LevelResult run() throws Exception {
-        // 段合并的对象：v3（3 分片）
-        if (!lab.exists(LabData.V3) || lab.count(LabData.V3) < LabData.DOCS) {
-            if (!lab.exists(LabData.V3)) {
-                es.put("/" + LabData.V3, lab.v3Definition());
-            }
-            lab.reindex(LabData.SOURCE, LabData.V3, LabData.DOCS, null);
-            lab.refresh(LabData.V3);
-        }
+        // 段合并的对象：v3（3 分片）；条数不符就整条重建，保证起点是同一份 2 万条
+        lab.ensureByReindex(LabIndexes.V3);
 
-        long segBefore = lab.segmentCount(LabData.V3);
+        long segBefore = lab.segmentCount(LabIndexes.V3);
 
         // @focus-start max_num_segments=1 表示「每个分片合并成 1 段」
-        JsonNode merge = es.post("/" + LabData.V3 + "/_forcemerge?max_num_segments=1", null, 120_000);
+        JsonNode merge = es.post("/" + LabIndexes.V3 + "/_forcemerge?max_num_segments=1", null, 120_000);
         // @focus-end
 
         long segAfter = segBefore;
         for (int i = 0; i < 10; i++) {
             Thread.sleep(300);
-            segAfter = lab.segmentCount(LabData.V3);
+            segAfter = lab.segmentCount(LabIndexes.V3);
             if (segAfter > 0 && segAfter != segBefore) break;
         }
 
-        // @focus-start 滚动索引：每次先把 -000002 之后清掉，保证重复运行不会滚到 -000003
-        for (String name : lab.indicesOf(LabData.LIVE_ALIAS + "-*")) {
+        // @focus-start 滚动索引：每次先把 -000001/-000002 全部清掉，保证重复运行不会滚到 -000003
+        for (String name : lab.indicesOf(LabIndexes.LIVE_ALIAS + "-*")) {
             lab.delete(name);
         }
-        es.put("/" + LabData.LIVE_1, lab.liveDefinitionWithAlias());
-        lab.bulkGenerate(LabData.LIVE_1, 0, LabData.LIVE_DOCS, null);
-        lab.refresh(LabData.LIVE_1);
+        lab.rebuild(LabIndexes.LIVE_1,
+                idx -> lab.bulkGenerate(idx, 0, LabIndexes.LIVE_DOCS, null));
         // @focus-end
 
-        long liveDocs = lab.indexCount(LabData.LIVE_1);
+        long liveDocs = lab.indexCount(LabIndexes.LIVE_1);
 
         // @focus-start 条件满足才滚；返回 rolled_over 与新旧索引名
-        JsonNode rollover = es.post("/" + LabData.LIVE_ALIAS + "/_rollover",
+        JsonNode rollover = es.post("/" + LabIndexes.LIVE_ALIAS + "/_rollover",
                 Map.of("conditions", Map.of("max_docs", 4_000)));
         // @focus-end
 
@@ -82,16 +76,16 @@ public class M84ForceMergeRollover implements LevelModule {
         Map<String, Object> doc = new LinkedHashMap<>(lab.productDoc(0));
         doc.put("sku", "ROLL-1");
         doc.put("title", "滚动索引验证商品");
-        JsonNode write = es.put("/" + LabData.LIVE_ALIAS + "/_doc/ROLL-1?refresh=true", doc);
+        JsonNode write = es.put("/" + LabIndexes.LIVE_ALIAS + "/_doc/ROLL-1?refresh=true", doc);
 
-        long newDocs = lab.indexCount(LabData.LIVE_2);
-        List<Map<String, Object>> aliases = lab.aliasRows(LabData.LIVE_ALIAS);
+        long newDocs = lab.indexCount(LabIndexes.LIVE_2);
+        List<Map<String, Object>> aliases = lab.aliasRows(LabIndexes.LIVE_ALIAS);
 
         List<List<Object>> rows = new ArrayList<>();
         rows.add(TableData.row("合并前段数", fmt(segBefore), "3 个分片各自累积出的段"));
         rows.add(TableData.row("合并后段数", fmt(segAfter), "理想值是「分片数 × 1」，即 3 而不是 1"));
-        rows.add(TableData.row(LabData.LIVE_1 + " 条数", fmt(liveDocs), "rollover 前的写索引"));
-        rows.add(TableData.row(LabData.LIVE_2 + " 条数", fmt(newDocs), "rollover 后写入的那 1 条"));
+        rows.add(TableData.row(LabIndexes.LIVE_1 + " 条数", fmt(liveDocs), "rollover 前的写索引"));
+        rows.add(TableData.row(LabIndexes.LIVE_2 + " 条数", fmt(newDocs), "rollover 后写入的那 1 条"));
         rows.add(TableData.row("新文档落到", write.path("_index").asText("?"), "写别名已指向新索引"));
 
         boolean rolled = rollover.path("rolled_over").asBoolean(false);

@@ -106,6 +106,11 @@ export interface Prereq {
   cluster?: boolean;
   indices?: PrereqIndex[];
   text?: string;
+  /**
+   * 本关自己会建的东西（索引、别名、模板、pipeline）。
+   * 它不参与「能不能跑」的判定 —— 只是告诉学员「这些不用你提前准备」。
+   */
+  creates?: string[];
 }
 
 export interface Level {
@@ -198,6 +203,57 @@ export interface AliasState {
   targets: string[];
   writeIndex: string;
   docs: number;
+}
+
+/** 索引生命周期：决定「谁在什么时候该删」 */
+export type IndexLifecycle =
+  | 'PERSISTENT'
+  | 'RESET_ON_RUN'
+  | 'RECREATE_ON_RUN'
+  | 'DROP_AFTER_RUN'
+  | 'ROLLOVER'
+  | 'PLANNED';
+
+/** 注册表里的一条索引（/api/lab/indexes）：登记信息 + 实时状态 */
+export interface LabIndexRow {
+  name: string;
+  chapter: string;
+  owner: string;
+  lifecycle: IndexLifecycle;
+  resetCost: 'FAST' | 'MEDIUM' | 'SLOW';
+  targetDocs: number;
+  aliases: string[];
+  writable: boolean;
+  note: string;
+  exists: boolean;
+  docs: number;
+  shards: number;
+  replicas: number;
+  segments: number;
+  storeBytes: number;
+}
+
+export interface LabAliasRow {
+  name: string;
+  defaultTarget: string;
+  candidates: string[];
+  writeIndex: string;
+  docs: number;
+}
+
+export interface LabAssetRow {
+  type: 'template' | 'pipeline' | string;
+  name: string;
+  pattern: string;
+  chapter: string;
+  exists: boolean;
+}
+
+export interface LabIndexesState {
+  indices: LabIndexRow[];
+  aliases: LabAliasRow[];
+  assets: LabAssetRow[];
+  writing?: string[];
 }
 
 export interface DataState {

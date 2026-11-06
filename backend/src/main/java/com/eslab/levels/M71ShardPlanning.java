@@ -1,6 +1,7 @@
 package com.eslab.levels;
 
 import com.eslab.levels.support.LabData;
+import com.eslab.levels.support.LabIndexes;
 import com.eslab.lib.EsClient;
 import com.eslab.lib.Json;
 import com.eslab.lib.Timing;
@@ -49,11 +50,12 @@ public class M71ShardPlanning implements LevelModule {
     @Override
     public LevelResult run() throws Exception {
         // @focus-start 受控实验：同一份 v2 定义，只把主分片数改成 1 与 3
-        lab.ensureByReindex(LabData.SHARD1, lab.shardLabDefinition(1), LabData.SOURCE, LabData.DOCS, null);
-        lab.ensureByReindex(LabData.SHARD3, lab.shardLabDefinition(3), LabData.SOURCE, LabData.DOCS, null);
+        // 定义与目标条数都在 LabIndexes 里登记，这里只声明「要哪两个索引达标」
+        lab.ensureByReindex(LabIndexes.SHARD1);
+        lab.ensureByReindex(LabIndexes.SHARD3);
         // flush 之后再读 store.size：刚 refresh 完的段可能还没落盘，体积会偏小，两组不可比
-        es.post("/" + LabData.SHARD1 + "/_flush", null);
-        es.post("/" + LabData.SHARD3 + "/_flush", null);
+        es.post("/" + LabIndexes.SHARD1 + "/_flush", null);
+        es.post("/" + LabIndexes.SHARD3 + "/_flush", null);
         // @focus-end
 
         // @focus-start 同一份数据、同一个查询，只差「索引怎么建」：v1(1分片/动态) vs v2(3分片/显式)
@@ -64,10 +66,10 @@ public class M71ShardPlanning implements LevelModule {
         // @focus-end
 
         // @focus-start 受控组的测量口径与上面完全一致（同样的 query、5 轮取中位数、丢弃 1 轮预热）
-        IndexStat c1 = stats(LabData.SHARD1);
-        IndexStat c3 = stats(LabData.SHARD3);
-        Timing.Sample q1 = Timing.sample(5, 1, round -> query(LabData.SHARD1));
-        Timing.Sample q3 = Timing.sample(5, 1, round -> query(LabData.SHARD3));
+        IndexStat c1 = stats(LabIndexes.SHARD1);
+        IndexStat c3 = stats(LabIndexes.SHARD3);
+        Timing.Sample q1 = Timing.sample(5, 1, round -> query(LabIndexes.SHARD1));
+        Timing.Sample q3 = Timing.sample(5, 1, round -> query(LabIndexes.SHARD3));
         // @focus-end
 
         List<List<Object>> rows = new ArrayList<>();

@@ -51,42 +51,17 @@ public class M112DynamicTemplates implements LevelModule {
 
     @Override
     public LevelResult run() throws Exception {
-        // @focus-start 两个索引唯一的差别是：左边有 dynamic_templates，右边只有裸 dynamic
-        lab.recreate(CTRL, Json.map(
-                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0),
-                "mappings", Json.map(
-                        "dynamic", true,
-                        "properties", Json.map(
-                                "sku", Json.map("type", "keyword"),
-                                "title", Json.map("type", "text",
-                                        "analyzer", "ik_max_word", "search_analyzer", "ik_smart")))));
-        lab.recreate(DYN, Json.map(
-                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0),
-                "mappings", Json.map(
-                        "dynamic", true,
-                        "dynamic_templates", List.of(
-                                Json.map("attrs_as_flattened", Json.map(
-                                        "match", "attrs",
-                                        "mapping", Json.map("type", "flattened"))),
-                                Json.map("strings_as_keyword", Json.map(
-                                        "match_mapping_type", "string",
-                                        "mapping", Json.map("type", "keyword", "ignore_above", 256)))),
-                        "properties", Json.map(
-                                "sku", Json.map("type", "keyword"),
-                                "title", Json.map("type", "text",
-                                        "analyzer", "ik_max_word", "search_analyzer", "ik_smart")))));
-        // @focus-end
-
         List<String> ids = new ArrayList<>();
         List<Map<String, Object>> docs = new ArrayList<>();
         for (int i = 0; i < DOCS; i++) {
             ids.add("DYN-" + i);
             docs.add(doc(i));
         }
-        lab.bulkWithIds(CTRL, ids, docs);
-        lab.bulkWithIds(DYN, ids, docs);
-        lab.refresh(CTRL);
-        lab.refresh(DYN);
+        // @focus-start 两个索引唯一的差别是：左边有 dynamic_templates，右边只有裸 dynamic
+        // 定义都在 LabIndexes 里，这里只声明「要哪个索引」，重建 + 灌数据在一把锁内完成
+        lab.rebuild(CTRL, idx -> lab.bulkWithIds(idx, ids, docs));
+        lab.rebuild(DYN, idx -> lab.bulkWithIds(idx, ids, docs));
+        // @focus-end
 
         JsonNode ctrlAttrs = mapping(CTRL).path("properties").path("attrs").path("properties");
         int ctrlSubFields = ctrlAttrs.size();

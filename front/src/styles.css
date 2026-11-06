@@ -492,6 +492,8 @@ h1 {
 
 .data-table {
   width: 100%;
+  /* 列多时不要压缩列宽去迁就容器：宁可让 .table-wrap 横向滚动 */
+  min-width: max-content;
   border-collapse: collapse;
   font-size: 12.5px;
 }
@@ -2383,4 +2385,234 @@ textarea {
 /* 没有小节的文章不占目录列 */
 .deep-layout.single {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/* ── 实验索引总览（路线图首屏的折叠区） ─────────────── */
+.lab-index-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.lab-index-panel > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 20px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.lab-index-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.lab-index-panel > summary::before {
+  content: '▸';
+  color: var(--muted-2);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+
+.lab-index-panel[open] > summary::before {
+  content: '▾';
+}
+
+.lab-index-panel > summary:hover .lab-index-title {
+  color: var(--accent);
+}
+
+.lab-index-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.lab-index-sub {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.lab-index-hint {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--muted-2);
+}
+
+.lab-index-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 20px 10px;
+  font-size: 12px;
+}
+
+.lab-index-scroll {
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+}
+
+.lab-index-table {
+  width: 100%;
+  min-width: 660px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.lab-index-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 8px 10px;
+  background: var(--code-bg);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.lab-index-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.lab-index-table th:first-child,
+.lab-index-table td:first-child {
+  padding-left: 20px;
+}
+
+.lab-index-table th:last-child,
+.lab-index-table td:last-child {
+  padding-right: 20px;
+}
+
+.lab-index-table td:last-child {
+  white-space: nowrap;
+}
+
+.lab-index-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lab-index-group td {
+  background: var(--bg);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  padding: 5px 10px 5px 20px;
+}
+
+.lab-index-absent code {
+  color: var(--muted-2);
+}
+
+.lab-index-alias {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.lab-index-over {
+  margin-left: 4px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.lc {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.lc-persist {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: #bfdbfe;
+}
+
+.lc-reset,
+.lc-recreate {
+  color: var(--muted);
+  background: var(--code-bg);
+  border-color: var(--border);
+}
+
+.lc-drop {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: #fde68a;
+}
+
+.lc-roll {
+  color: #6d28d9;
+  background: #f5f3ff;
+  border-color: #ddd6fe;
+}
+
+.lc-plan {
+  color: var(--muted-2);
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--border-strong);
+}
+
+.lab-index-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 20px 16px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.lab-index-label {
+  display: inline-block;
+  min-width: 56px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.lab-alias {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 14px;
+}
+
+.lab-index-cost {
+  font-size: 11.5px;
+}
+
+@media (max-width: 760px) {
+  .lab-index-hint {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+}
+
+/* 前置条里的「本关自建」标签 */
+.prereq-create {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  font-size: 11.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
 }

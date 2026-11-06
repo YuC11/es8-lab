@@ -44,17 +44,20 @@ public class ApiController {
     private final EsClient es;
     private final LevelRegistry levels;
     private final ExperimentRegistry experiments;
+    private final LevelRunner runner;
     private final ObjectMapper mapper;
     private final Path root;
 
     public ApiController(EsClient es,
                          LevelRegistry levels,
                          ExperimentRegistry experiments,
+                         LevelRunner runner,
                          ObjectMapper mapper,
                          ProjectRoot projectRoot) {
         this.es = es;
         this.levels = levels;
         this.experiments = experiments;
+        this.runner = runner;
         this.mapper = mapper;
         this.root = projectRoot.path();
     }
@@ -184,18 +187,17 @@ public class ApiController {
         if (module == null) {
             return ResponseEntity.status(404).body(Map.of("ok", false, "error", "未知关卡 " + id));
         }
-        long started = System.currentTimeMillis();
         try {
-            LevelResult result = module.run();
-            long elapsed = System.currentTimeMillis() - started;
+            LevelRunner.Outcome outcome = runner.run(module);
+            LevelResult result = outcome.result();
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("ok", true);
             out.put("id", id);
             out.put("result", result);
-            out.put("elapsedMs", elapsed);
+            out.put("aliasPins", outcome.pins());
+            out.put("elapsedMs", outcome.elapsedMs());
             return ResponseEntity.ok(out);
         } catch (Exception e) {
-            long elapsed = System.currentTimeMillis() - started;
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("ok", false);
             out.put("id", id);
@@ -203,7 +205,6 @@ public class ApiController {
             out.put("hint", e instanceof EsException
                     ? "这是 ES 返回的错误，详情见 error 字段；常见原因：索引未导入（先跑 seed）或字段名/类型不匹配。"
                     : "后端执行异常，详情见 error 字段。");
-            out.put("elapsedMs", elapsed);
             return ResponseEntity.status(500).body(out);
         }
     }
