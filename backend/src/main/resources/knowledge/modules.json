@@ -21,10 +21,10 @@
         {
           "id": "m0-1",
           "title": "集群里有什么：先体检，再动手",
-          "objective": "说清 index / shard / segment 三个词，并能解释单节点集群为什么是 yellow",
+          "objective": "按「集群 → 节点 → 本项目索引」三步体检，并能解释 yellow 是谁造成的",
           "hook": "在写第一条数据之前，先确认你连上的是哪个集群、里面有没有东西。",
           "predict": "这个空集群里，_cat/indices 会返回什么？",
-          "brief": "这个集群现在是空的：_cat/indices 返回空数组，_cluster/health 告诉你节点数和分片分配状态。空不是问题，它正是起点——后面每一关的数字都建立在你亲手写进去的数据上。先把三个词分清：index 是逻辑命名空间，shard 是 Lucene 实例（数量建索引时定死），segment 是不可变的倒排索引文件（refresh 时生成）。",
+          "brief": "这个集群现在可能什么都没有，也可能已经有一堆索引。体检要分三步：_cluster/health 看整体分片分配，_cat/nodes 看这台机器有多少资源，_cat/indices/eslab-* 只看属于这门课的资产。关键是第四步：用 _cat/shards 找出 UNASSIGNED 的分片，按「是不是 eslab-*」分开 —— 单节点放不下副本，yellow 往往来自既有索引，不该算到课程头上。先把三个词分清：index 是逻辑命名空间，shard 是 Lucene 实例（建索引时定死），segment 是不可变的倒排索引文件（refresh 时生成）。",
           "deep": [
             {
               "type": "p",
@@ -101,7 +101,7 @@
           "steps": [
             {
               "label": "运行本关",
-              "desc": "查询集群健康、节点、eslab-* 索引清单，并检查 ik 分词插件是否就绪",
+              "desc": "读集群健康 → 节点清单 → 只列 eslab-* 索引 → 用 _cat/shards 找出未分配分片及其原因",
               "kind": "level"
             }
           ],
@@ -109,9 +109,9 @@
             {
               "task": "看集群里现在有哪些 eslab-* 索引（空数组就是起点）",
               "method": "GET",
-              "path": "/_cat/indices/eslab-*?v",
-              "watch": "返回的行数与列名",
-              "expect": "空集群时一行都没有；有索引时会列出 docs.count 与 store.size"
+              "path": "/_cat/indices/eslab-*?format=json&h=index,health,docs.count",
+              "watch": "返回数组为空就是空库；有内容时数一数健康状态",
+              "expect": "空集群返回 []。这就是「起点是空的」最直接的证据，比任何描述都可靠。"
             },
             {
               "task": "查集群健康状态与节点数",
@@ -126,9 +126,16 @@
               "path": "/_cat/nodes?v&h=name,version,heap.percent,disk.avail",
               "watch": "heap.percent 与 disk.avail",
               "expect": "开发环境堆占用通常在 20–50%，磁盘余量决定你能否灌 20 万条"
+            },
+            {
+              "task": "未分配分片属于谁、为什么",
+              "method": "GET",
+              "path": "/_cat/shards?format=json&h=index,shard,prirep,state,unassigned.reason",
+              "watch": "state=UNASSIGNED 的行是哪些索引，reason 写的是什么",
+              "expect": "通常能看到既有索引（articles、test_aggs、Kibana 样例）的副本分片 UNASSIGNED，reason 多为 CLUSTER_RECOVERED 或 INDEX_CREATED。单节点放不下副本，所以 yellow 是配置结果；只要 eslab-* 自己全 green，就跟课程无关。"
             }
           ],
-          "takeaway": "集群状态是可以读出来的事实，不是靠猜；yellow 在单节点下是配置结果，不是故障",
+          "takeaway": "yellow 是可以归因的：先看未分配分片属于谁、reason 是什么，再决定要不要管",
           "next": "m0-2",
           "prereq": {
             "cluster": true,
@@ -139,10 +146,10 @@
         {
           "id": "m0-2",
           "title": "建你的第一个索引：settings 里那两个数字",
-          "objective": "看懂 settings 里三个数字各自约束什么，以及为什么分片数改不了",
+          "objective": "看懂默认 settings 与本关显式设置的差异，并知道分片数为什么改不了",
           "hook": "一条 PUT 就能建索引——但分片数和副本数，决定了后面所有性能问题的形状。",
           "predict": "只给分片数、不写 mappings，PUT 会成功还是报错？",
-          "brief": "建索引只需要 settings，mappings 可以完全不写：ES 不会报错，它会把类型推断推迟到「第一次写入某个字段」的时刻。这一关刻意不写 mappings，就是要让你先看见「不写也能建成功」，第 1 章再回来算这笔账。分片数在建索引时定死，之后只能 reindex 重建；副本数可以随时改，但单节点集群设 0，否则分片无处分配。",
+          "brief": "建索引只需要 settings，mappings 可以完全不写：ES 不会报错，它把类型推断推迟到「第一次写入某个字段」。但「不写 settings」不等于「没有设置」—— ES 8 的默认是 1 主分片 + 1 副本，单节点上副本无处分配，索引一出生就是 yellow。本关先空 body 建一个探针索引验证默认值，读完即删；再显式建 v1（1 分片 / 0 副本），最后真的发一次 PUT 把主分片改成 2，看 ES 怎么拒绝。",
           "deep": [
             {
               "type": "p",
@@ -210,7 +217,7 @@
           "steps": [
             {
               "label": "运行本关",
-              "desc": "创建 v1（1 分片、0 副本、不写 mappings），随后读取它的 settings 与分片分布",
+              "desc": "空 body 建探针索引读默认 settings（读完即删）→ 显式建 v1 → 读回 settings 与 mapping → PUT 改主分片抓 400",
               "kind": "level"
             }
           ],
@@ -235,9 +242,21 @@
               "path": "/eslab-products-v1/_mapping",
               "watch": "返回是不是空对象",
               "expect": "properties 为空——映射还没生成，它要等第一次写入才出现"
+            },
+            {
+              "task": "试着把主分片数改成 2",
+              "method": "PUT",
+              "path": "/eslab-products-v1/_settings",
+              "body": {
+                "index": {
+                  "number_of_shards": 2
+                }
+              },
+              "watch": "返回 200 还是 400",
+              "expect": "400 illegal_argument_exception：Can't update non dynamic settings [[index.number_of_shards]] for open indices。主分片数只能靠 _reindex 建新索引再搬数据；副本数则是动态的，可以随时改。"
             }
           ],
-          "takeaway": "索引可以先建、Mapping 可以后补，但分片数一旦定下就只能 reindex",
+          "takeaway": "默认值不是「你以为的那个」：不写 settings 就是 1 主 1 副；主分片改不了，副本能改",
           "next": "m0-3",
           "after": {
             "indices": [
@@ -257,7 +276,7 @@
           "objective": "能解释 GET 与 _search 的可见性差异，并说出 refresh 与 flush 的分工",
           "hook": "写入成功不等于搜得到。同一秒内，GET 能读到，_search 可能读不到。",
           "predict": "写入一条文档后立刻 _search，命中数会增加吗？",
-          "brief": "写入走的是一条流水线：先写 translog（保证不丢），再进内存 buffer，refresh 时 buffer 被写成一个新的不可变 segment，这时数据才可被搜索。所以「刚写完搜不到」不是 bug，是 1 秒的可见性延迟换吞吐。而 GET by _id 是另一条路径：它直接按 _id 定位分片并读 translog，所以是实时的。两条路径的可见性不一致，这一点在排查线上问题时非常容易骗人。",
+          "brief": "写入走的是一条流水线：先写 translog（保证不丢），再进内存 buffer，refresh 时 buffer 被写成一个新的不可变 segment，数据才可被搜索。所以「刚写完搜不到」不是 bug，是 1 秒可见性延迟换吞吐。而 GET by _id 是另一条路径：直接按 _id 定位分片并读 translog，是实时的。本关先删掉同 _id 的旧文档并 refresh 清场，保证「写之前搜不到」是确定的，再按时间线走一遍：写入 → GET → 立即 _search → refresh → 再 _search。固定 _id 顺带证明另一件事：重跑只有 _version 递增，文档数始终是 1。",
           "deep": [
             {
               "type": "p",
@@ -330,7 +349,7 @@
           "steps": [
             {
               "label": "运行本关",
-              "desc": "写入一条商品文档，然后分别用 GET 和 _search 去读它，最后手动 refresh 再读一次",
+              "desc": "删旧文档并 refresh 清场 → 写入固定 _id → GET → 立即 _search → 手动 refresh → 再 _search",
               "kind": "level"
             }
           ],
@@ -348,19 +367,31 @@
               "path": "/eslab-products-v1/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "query": {
                   "match_all": {}
                 }
               },
-              "watch": "hits.total.value 是不是比你预期的少 1",
-              "expect": "可能比实际写入数少 1——刚写的那条还在内存 buffer 里，没被 refresh 成段"
+              "watch": "total 是否精确等于索引当前条数",
+              "expect": "track_total_hits=true 时 total 是精确值（本机是 2 万上下）。这里的 total 只统计已刷新的段，所以刚写完的那条可能还没算进去。"
             },
             {
-              "task": "用 _count 再确认一次",
-              "method": "GET",
-              "path": "/eslab-products-v1/_count",
-              "watch": "count 与上一条 _search 的 total 是否一致",
-              "expect": "两者走同一条可见性路径，数字应当一致"
+              "task": "精确数这条 _id 有几条文档",
+              "method": "POST",
+              "path": "/eslab-products-v1/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "ids": {
+                    "values": [
+                      "SKU2026000001"
+                    ]
+                  }
+                }
+              },
+              "watch": "hits.total 是不是 1，重复运行后有没有变多",
+              "expect": "始终是 1。固定 _id 是覆盖写：重复运行只会让 _version 递增，不会产生第二条文档 —— 这是幂等写入的前提。"
             }
           ],
           "takeaway": "refresh 决定「看得见」，flush 决定「丢不了」——两件事，两个时间尺度",

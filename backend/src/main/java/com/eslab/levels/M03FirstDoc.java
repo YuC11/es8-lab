@@ -2,6 +2,7 @@ package com.eslab.levels;
 
 import com.eslab.data.DatasetService;
 import com.eslab.lib.EsClient;
+import com.eslab.lib.EsException;
 import com.eslab.lib.Json;
 import com.eslab.model.LevelModule;
 import com.eslab.model.LevelResult;
@@ -11,15 +12,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
  * M0-3 写一条文档，然后立刻读回来
  *
- * 近实时（NRT）这个概念的第一次现身，就藏在这一关：
- * 同一条文档，GET by _id 立刻能拿到，_search 却可能查不到。
- * 不是数据没写进去，是「搜的道」和「读的道」不是同一条。
+ * 近实时（NRT）第一次现身：同一条文档，GET by _id 立刻拿得到，_search 却可能看不到。
+ * 不是没写进去，是「读的道」和「搜的道」不是同一条。
+ *
+ * 为了让这个对照每次都成立，本关先清场：删掉旧的同 _id 文档并 refresh，
+ * 保证「写入前一定搜不到、写入后一定还没刷新」。否则第二次运行会看到上一次刷新的结果，
+ * 表格里就会出现「refresh 前后都是 1 条」，把结论变成「恰好赶上了」。
+ *
+ * 固定 _id 还带出另一个结论：重跑只更新同一条文档（version 递增），不会产生重复数据。
  */
 @Component
 public class M03FirstDoc implements LevelModule {
@@ -46,9 +54,23 @@ public class M03FirstDoc implements LevelModule {
         }
         String index = DatasetService.V1;
 
-        // @focus-start 写入一条：_id 由业务决定，这是幂等写入的前提
+        // @focus-start ① 清场：删掉旧的同 _id 文档并 refresh —— 保证「写之前搜不到」是确定的
+        long start = System.nanoTime();
+        boolean cleaned = false;
+        try {
+            JsonNode del = es.delete("/" + index + "/_doc/" + DOC_ID + "?refresh=false");
+            cleaned = "deleted".equals(del.path("result").asText());
+        } catch (EsException e) {
+            // 404：本来就没有这条，属于正常起点
+        }
+        es.post("/" + index + "/_refresh", null);
+        long beforeWrite = countIds(index);
+        double clearMs = elapsed(start);
+        // @focus-end
+
+        // @focus-start ② 写入一条：_id 由业务决定，这是幂等写入的前提
         long t0 = System.nanoTime();
-        JsonNode write = es.put("/" + index + "/_doc/" + DOC_ID, Json.map(
+        JsonNode write = es.put("/" + index + "/_doc/" + DOC_ID + "?refresh=false", Json.map(
                 "sku", DOC_ID,
                 "title", "声阔 主动降噪头戴耳机 Q45",
                 "description", "轻量 旗舰 长续航 主动降噪 双设备连接",
@@ -63,54 +85,105 @@ public class M03FirstDoc implements LevelModule {
                 "sales", 1820,
                 "seller_id", "S0001",
                 "specs", Json.map("color", "曜石黑", "material", "ABS", "weight_g", 245)));
-        double writeMs = (System.nanoTime() - t0) / 1_000_000.0;
+        double writeMs = elapsed(t0);
         // @focus-end
 
-        // @focus-start 两条读路径：GET 是实时的，_search 只看得见已刷新的段
+        // @focus-start ③ 三条读路径：GET 实时、_search 只看得见已刷新的段
+        long t1 = System.nanoTime();
         JsonNode got = es.get("/" + index + "/_doc/" + DOC_ID);
-        long beforeRefresh = searchCount(index);
-        es.post("/" + index + "/_refresh", null);
-        long afterRefresh = searchCount(index);
+        double getMs = elapsed(t1);
+
+        long t2 = System.nanoTime();
+        long afterWrite = countIds(index);
+        double searchMs = elapsed(t2);
+
+        long t3 = System.nanoTime();
+        JsonNode refreshed = es.post("/" + index + "/_refresh", null);
+        double refreshMs = elapsed(t3);
+
+        long t4 = System.nanoTime();
+        long afterRefresh = countIds(index);
+        double search2Ms = elapsed(t4);
         // @focus-end
 
         boolean found = got.path("found").asBoolean(false);
+        long version = write.path("_version").asLong();
+        long seqNo = write.path("_seq_no").asLong();
+        String result = write.path("result").asText("?");
 
         List<List<Object>> rows = new ArrayList<>();
-        rows.add(TableData.row("PUT /_doc/" + DOC_ID, write.path("result").asText("created"),
-                "写入成功，此时数据在 translog + 内存 buffer 里"));
-        rows.add(TableData.row("GET /_doc/" + DOC_ID, found ? "命中" : "未命中",
-                "GET 按 _id 直读，是实时的，能穿透到 translog"));
-        rows.add(TableData.row("_search（refresh 前）", beforeRefresh + " 条",
-                beforeRefresh > 0 && beforeRefresh == afterRefresh ? "这次刚好跨过了 1s 刷新窗口" : "看不到刚写的那条"));
-        rows.add(TableData.row("POST /_refresh", "生成新段", "把内存 buffer 落成一个可搜索的 segment"));
-        rows.add(TableData.row("_search（refresh 后）", afterRefresh + " 条", "现在能搜到了"));
+        rows.add(TableData.row("① 清理旧文档 + refresh", fmt(clearMs) + " ms",
+                cleaned ? "删除了上一轮的文档" : "本来就没有（首次运行）",
+                "该 _id 命中 " + beforeWrite + " 条，起点干净"));
+        rows.add(TableData.row("② PUT 写入固定 _id", fmt(writeMs) + " ms",
+                "result=" + result + " · _version=" + version + " · _seq_no=" + seqNo,
+                "写 translog + 内存 buffer，不立即建段"));
+        rows.add(TableData.row("③ GET /_doc/" + DOC_ID, fmt(getMs) + " ms",
+                found ? "命中（_version=" + got.path("_version").asLong() + "）" : "未命中",
+                "按 _id 直读，实时路径"));
+        rows.add(TableData.row("④ 立即 _search（ids 查询）", fmt(searchMs) + " ms",
+                afterWrite + " 条", "搜索只看得见已刷新的段"));
+        rows.add(TableData.row("⑤ POST /_refresh", fmt(refreshMs) + " ms",
+                refreshed.path("_shards").path("successful").asInt(0) + " 个分片刷新生效",
+                "buffer 落成新的可搜索 segment"));
+        rows.add(TableData.row("⑥ 再 _search（同一条查询）", fmt(search2Ms) + " ms",
+                afterRefresh + " 条", "多出来的就是刚写的那条"));
 
-        String summary = afterRefresh > beforeRefresh
-                ? "同一条文档：GET 立刻读得到，_search 要等一次 refresh 才看得见——这就是「近实时」的全部含义。"
-                : beforeRefresh == afterRefresh
-                ? "这次 _search 恰好赶在刷新之后，两次计数相同。刷新窗口只有 1 秒，重复执行本关就能抓到差异。"
-                : "写入后搜到了，说明刷新恰好发生在两次查询之间。";
+        Map<String, Object> json = new LinkedHashMap<>();
+        json.put("write", write);
+        json.put("get", got);
+        json.put("counts", Json.map("beforeWrite", beforeWrite, "afterWrite", afterWrite,
+                "afterRefresh", afterRefresh));
+        json.put("refresh", refreshed);
+
+        String summary;
+        if (afterWrite == 0 && afterRefresh == 1) {
+            summary = "写入后立刻验证：GET 命中（_version=" + version + "），_search 却是 0 条；"
+                    + "refresh 之后同一条查询变 1 条 —— 搜索走段，GET 走 translog，两条路的可见性不一样";
+        } else if (afterWrite == 1 && afterRefresh == 1) {
+            summary = "这次 _search 立即看到了文档（写入与查询之间跨过了刷新窗口或段已合并），"
+                    + "但 GET 与 _search 走的是两条路径这件事不变；重复运行本关会重新清场再测";
+        } else {
+            summary = "写入后 _search 命中 " + afterWrite + " 条、refresh 后 " + afterRefresh
+                    + " 条 —— 与预期不符，先检查 refresh_interval 是否被改成 -1";
+        }
 
         return LevelResult.builder(summary)
                 .metrics(
-                        new Metric("写入耗时", String.format("%.1f ms", writeMs), "单条写入"),
-                        new Metric("GET 读回", found ? "命中" : "未命中", "实时路径"),
-                        new Metric("refresh 前 _search", beforeRefresh + " 条", "只统计已刷新的段"),
-                        new Metric("refresh 后 _search", afterRefresh + " 条", "多出来的就是刚写的那条"))
-                .table(new TableData(List.of("操作", "结果", "为什么"), rows))
-                .json(Map.of("write", write, "get", got))
+                        new Metric("GET 读回", found ? "命中" : "未命中",
+                                "实时路径 · _version=" + got.path("_version").asLong()),
+                        new Metric("写入后 _search", afterWrite + " 条", "写进 buffer，还没建段"),
+                        new Metric("refresh 后 _search", afterRefresh + " 条", "与上一条的差就是可见性延迟"),
+                        new Metric("该 _id 文档数", afterRefresh + " 条", "固定 _id ⇒ 重跑不产生重复"),
+                        new Metric("写入结果", result, "_version=" + version + " · _seq_no=" + seqNo),
+                        new Metric("写入耗时", fmt(writeMs) + " ms", "单条 · refresh=false"))
+                .table(TableData.of(List.of("步骤", "相对耗时", "结果", "为什么"), rows))
+                .json(json)
                 .notes(
-                        "写入不是「直接落到磁盘」：先写 translog（保证不丢），再进内存 buffer，"
-                                + "refresh 时 buffer 被写成一个新的不可变 segment，这时才可被搜索。",
-                        "refresh 默认 1s。所以「写完立刻查不到」不是 bug，是设计：用 1 秒的可见性延迟换取吞吐。",
-                        "GET by _id 走的是实时的 translog 读取，所以它和 _search 的可见性不一致——排查问题时这个差异会骗人。",
-                        "数据量上来后（下一关），你会看到 refresh 的另一种代价：段太多会拖慢搜索并触发后台 merge。")
+                        "写入不是「直接落盘」：先写 translog（保证不丢），再进内存 buffer；refresh 时 buffer 落成"
+                                + "新的不可变 segment，这时才可被搜索。所以「写完立刻搜不到」不是 bug，是设计。",
+                        "GET by _id 走实时路径（会穿透到 translog），_search 只认已刷新的段 —— "
+                                + "排查问题时这个差异极容易骗人：监控里「查不到」不代表「没写进去」。",
+                        "本关先删旧文档再写，是为了让每次运行都从「搜不到」开始；否则上一轮的段还在，"
+                                + "表格里 refresh 前后都是 1 条，看起来像「刷新没用」。这个清场动作本身就是可复现性的一部分。",
+                        "固定 _id 带来幂等：重复运行只有 _version 递增，文档数始终是 1。"
+                                + "换成自动 _id，每跑一次就多一条 —— 这是 M3-2 的主题。",
+                        "本关的清理范围只有这一条文档：" + DOC_ID + "；不删索引、不动其他数据。")
                 .build();
     }
 
-    private long searchCount(String index) {
-        JsonNode res = es.post("/" + index + "/_search",
-                Json.map("size", 0, "query", Json.map("match_all", Json.map())));
-        return res.path("hits").path("total").path("value").asLong(0);
+    /** 用 ids 查询精确数这条 _id 的文档数：不受索引里已有 2 万条数据影响 */
+    private long countIds(String index) {
+        JsonNode res = es.post("/" + index + "/_count",
+                Json.map("query", Json.map("ids", Json.map("values", Json.list(DOC_ID)))));
+        return res.path("count").asLong(0);
+    }
+
+    private static double elapsed(long startedNanos) {
+        return Math.round((System.nanoTime() - startedNanos) / 1_000_000.0 * 10) / 10.0;
+    }
+
+    private static String fmt(double v) {
+        return String.format(Locale.ROOT, "%.1f", v);
     }
 }

@@ -67,6 +67,8 @@ public class LabIndexes {
     // ── M1/M3 的一次性演示索引 ────────────────────────────────
     // 这些索引只在自家关卡里有意义，但定义必须和别处一样只有一份：
     // 之前它们散落在 5 个关卡类里，同一个「sku/title/price」字段表被抄了 3 遍。
+    /** m0-2：空 body 建出来的「默认索引」，读完设置就删 —— 默认 1 分片 1 副本在单节点上必然 yellow */
+    public static final String DEMO_DEFAULTS = "eslab-demo-defaults";
     /** m1-1：只给分片数、不给 mappings，字段类型全交给 ES 猜 */
     public static final String DEMO_AUTO = "eslab-demo-auto";
     /** m1-4：反面教材，属性平铺成字段直到撞上限 */
@@ -235,6 +237,10 @@ public class LabIndexes {
                 "限速后跑不完，用来演示超时与 _cancel");
 
         // M1/M3 的演示索引：每关自己重建，不跨关复用
+        // m0 的两个一次性探针：一个看默认设置，一个量批次大小
+        index(DEMO_DEFAULTS, "m0", "m0-2", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
+                Source.SELF, 0, () -> Json.map(), List.of(), true,
+                "运行期间存在：空 body 建出的默认索引（1 分片 / 1 副本），读完设置即删");
         index(DEMO_AUTO, "m1", "m1-1", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
                 Source.SELF, 2, this::demoAutoDefinition, List.of(), true,
                 "运行期间存在，展示完字段类型就删；mappings 交给动态映射");
