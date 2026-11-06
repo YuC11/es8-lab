@@ -4506,10 +4506,10 @@
         {
           "id": "m6-2",
           "title": "search_after + PIT：深分页的正确姿势",
-          "objective": "用游标分页替代偏移分页，并理解 PIT 解决的一致性問題",
-          "hook": "用「上一页最后一条的排序值」当前进的锚点，每页代价恒定。",
+          "objective": "用游标分页替代偏移分页，并理解 PIT 解决的一致性问题",
+          "hook": "用「上一页最后一条的排序值」作锚点，每页每片只取 size 条。",
           "predict": "search_after 翻到第 50 页，单页耗时会变慢吗？",
-          "brief": "search_after 不带 from，而是带上上一页最后一条的 sort 值，ES 从该位置继续取。配合 PIT（Point In Time）锁定一致视图，避免翻页期间写入导致重复/漏数据。本关实测：from+size 跳到第 10 页 vs search_after 翻 10 页的总成本。",
+          "brief": "search_after 不带 from，而是带上上一页最后一条的 sort 值，ES 从该位置继续取；配合 PIT 锁住一个一致视图。本关在同一个 PIT 里从第 1 / 51 / 100 页三个起点各连翻 4 页，逐页记录 took、客户端耗时、每片候选量和末条游标：定位的每片候选随 from 线性上涨（100 → 10,000 条），游标页恒为 100 条；另外抓一次 from=15000 的 400 和关闭 PIT 后的 404，让「窗口上限」与「资源释放」都变成可核对的响应，而不是文案。",
           "deep": [
             {
               "type": "p",
@@ -4570,6 +4570,16 @@
               ]
             },
             {
+              "type": "p",
+              "text": "读这一关的数字要分清两件事：**候选量是确定的**（每片 from+size 条，表格第 4 列），**耗时是不确定的**（took 只有 1ms 分辨率，5 轮中位数仍会抖 1–4ms）。所以结论落在「候选量随 from 线性上涨 + 超过窗口直接 400」，而不是给一条漂亮的曲线。"
+            },
+            {
+              "type": "callout",
+              "tone": "warn",
+              "title": "别用客户端墙钟比这几毫秒",
+              "text": "墙钟包含建连、序列化、JSON 解析等固定开销（本机约 4ms），比 from 从 0 到 9900 带来的差异还大。本关第一次实现就是用墙钟对比，结论是「深翻不花钱」—— 完全反了。性能对比只用 ES 的 `took`。"
+            },
+            {
               "type": "callout",
               "tone": "warn",
               "text": "`_shard_doc` 是 PIT 场景下的稳定排序键，但它只在同一个 PIT 内有效 —— 拿它跨 PIT 翻页会得到错误结果。",
@@ -4584,7 +4594,7 @@
           "steps": [
             {
               "label": "运行本关",
-              "desc": "from+size 跳页 vs PIT+search_after 翻 10 页，对比总成本；结束后自动关闭 PIT",
+              "desc": "同一 PIT 内从第 1/51/100 页各翻 4 页，逐页记 took、客户端耗时、每片候选与游标；抓 from=15000 的 400；关闭 PIT 后用旧 id 复验 404",
               "kind": "level"
             }
           ],
@@ -4603,9 +4613,10 @@
                   {
                     "price": "asc"
                   }
-                ]
+                ],
+                "track_total_hits": true
               },
-              "watch": "前 5 条里有没有价格完全相同的文档",
+              "watch": "前 5 条里有没有价格完全相同的文档；顺带看 total 是否精确（track_total_hits=true 时是 20,000）",
               "expect": "大概率有同价文档。search_after 是严格的大于比较，同价文档在两次请求间的相对顺序可能变化 —— 这就是翻页重复/漏数据的根源，且极难复现。"
             },
             {
@@ -4625,7 +4636,8 @@
                   {
                     "sku": "asc"
                   }
-                ]
+                ],
+                "track_total_hits": true
               },
               "watch": "排序是否变成全序（任意两条都不会相等）",
               "expect": "排序键组合唯一，翻页游标才稳定。生产上要么用 PIT 里的 _shard_doc，要么用业务唯一键（sku）做 tiebreaker。"
@@ -4636,9 +4648,31 @@
               "path": "/eslab-products-v2/_pit?keep_alive=1m",
               "watch": "返回的 id 是否长且每次不同",
               "expect": "返回一个长 id。PIT 固定段视图，保证整个翻页过程看到同一份快照；代价是这些段不能被 merge/回收，所以必须设合理 keep_alive 并及时关闭。"
+            },
+            {
+              "task": "把 from 设到 15000，看窗口上限怎么拒绝",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "from": 15000,
+                "size": 100,
+                "sort": [
+                  {
+                    "price": "asc"
+                  },
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku"
+                ]
+              },
+              "watch": "返回的是 400 还是慢查询",
+              "expect": "400：顶层 type 是 search_phase_execution_exception，root_cause 是 illegal_argument_exception，reason 写明 from + size = 15100 超过 10000（index.max_result_window）。深到一定位置不是「变慢」，是「不可用」；调大窗口只是把崩溃点往后移。"
             }
           ],
-          "takeaway": "search_after 的价值是每页成本恒定，不是总成本更低",
+          "takeaway": "两种分页的代价来源不同：from+size 让每片多吐候选且有 10000 条上限，search_after 每页恒定；本机的毫秒数不能外推线上",
           "next": "m6-3",
           "prereq": {
             "cluster": true,
@@ -4657,7 +4691,7 @@
           "objective": "用 profile 与段统计定位「慢在哪一步」，而不是凭感觉改查询",
           "hook": "「ES 慢」不是结论，profile 会告诉你时间花在 query、rewrite 还是 fetch。",
           "predict": "profile 输出里，耗时大头在 query 还是 fetch？",
-          "brief": "profile 返回查询的执行计划树（每个节点的时间、文档数、子节点），把嵌套结构按类型累计就能看出瓶颈：是 term 查询扫得太多，还是 range 的 BKD intersect 太贵，还是 fetch 阶段取 _source 太慢。段统计（_stats/segments）则回答「为什么缓存没生效」。",
+          "brief": "profile 返回一棵执行计划树：query 段每个节点带累计耗时，collector 与 fetch 在另外两段（fetch 在分片级，不在 searches 里）。关键读法是「累计 vs 自身」：父节点的累计已含子节点，父子相加会重复计数；自身 = 累计 − 直接子节点，只有这一列能在兄弟节点之间横向比较。本关把两列并排给出，并把 took（墙钟）独立在指标里。",
           "deep": [
             {
               "type": "p",
@@ -4688,8 +4722,8 @@
             {
               "type": "callout",
               "tone": "warn",
-              "text": "profile 只覆盖 query 阶段，不含 fetch（取 _source、高亮、聚合）。所以「query 阶段 19ms」不等于「这个请求 19ms」。",
-              "title": "覆盖范围有限"
+              "text": "profile 覆盖 query / rewrite / collector / fetch；有聚合时还会多一段 aggregations。其中 fetch 与 aggregations 挂在**分片级**（`shards[].fetch`），不在 `searches[]` 里 —— 找不到 fetch 段通常是把结构看错了，不是它不存在。",
+              "title": "profile 的分段"
             },
             {
               "type": "p",
@@ -4700,7 +4734,7 @@
           "steps": [
             {
               "label": "运行本关",
-              "desc": "对一个 bool 查询开启 profile，按类型汇总耗时；同时读取段数、单段文档数、节点累计查询时间",
+              "desc": "对同一个 bool 查询开 profile：把 query 树按父子展开，同时给「累计」与「自身」两列；collector、fetch 分段列出；took 作为墙钟单独展示",
               "kind": "level"
             }
           ],
@@ -4734,8 +4768,8 @@
                   }
                 }
               },
-              "watch": "facts 里各节点类型的耗时排序（bool / term / range）",
-              "expect": "bool 节点耗时最大（含子节点），下面挂着 term 与 range。profile 的时间是纳秒累计、包含子节点，所以加起来远大于 took —— 看占比，不看绝对值。"
+              "watch": "表格里 query 树的累计/自身两列，以及「最贵节点（自身）」",
+              "expect": "根节点（ConstantScoreQuery / BooleanQuery）累计最大，因为它包含子节点；但自身耗时很小。真正贵的是叶子里的 IndexOrDocValuesQuery（price 范围）和 TermQuery。判断热点只看自身耗时，累计列只用来理解结构。"
             },
             {
               "task": "读段统计",
@@ -4752,7 +4786,7 @@
               "expect": "query_total 是累计查询次数。用它和 query_time 算平均值只能看趋势，不能当单次耗时 —— 但对比优化前后的斜率很有用。"
             }
           ],
-          "takeaway": "先读 profile 的 breakdown 再动手；凭直觉优化通常改错地方",
+          "takeaway": "先看「自身耗时」找热点；累计不能相加，墙钟只认 took",
           "next": "m6-4",
           "prereq": {
             "cluster": true,

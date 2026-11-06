@@ -39,10 +39,15 @@ public class M61DeepPaging implements LevelModule {
 
     @Override
     public LevelResult run() throws Exception {
+        // 全局预热：首档如果冷启动，took 会明显偏高（实测出现 12ms vs 后面 3ms 的反序），
+        // 与 from 的大小无关。先各打一次不计入样本，再看曲线。
+        page(0);
+        page(9000);
+
         List<PageSample> results = new ArrayList<>();
         // @focus-start 四个页码档位，各采 3 轮取中位数（只看 took，不含网络）
         for (int from : FROM_STEPS) {
-            Timing.Sample t = Timing.sample(3, 1, round -> page(from));
+            Timing.Sample t = Timing.sample(3, 0, round -> page(from));
             results.add(new PageSample(from, t.median(), t.runs()));
         }
         // @focus-end
@@ -64,8 +69,11 @@ public class M61DeepPaging implements LevelModule {
             if (limitError.isEmpty()) limitError = e.getMessage();
         }
 
-        double base = results.get(0).median() != 0 ? results.get(0).median() : 0.1;
+        double base = results.get(0).median();
         double last = results.get(results.size() - 1).median();
+        double ratio = base > 0 ? last / base : 0;
+        boolean amplified = base > 0 && ratio >= 1.5;
+        String baseText = base <= 0 ? "<1" : num(base);
 
         List<BarChartData.Item> chartItems = new ArrayList<>();
         List<Object> sampleRows = new ArrayList<>();
@@ -74,20 +82,32 @@ public class M61DeepPaging implements LevelModule {
             sampleRows.add(Json.map("from", r.from(), "median", r.median(), "samples", r.samples()));
         }
 
-        return LevelResult.builder("第 1 页 " + num(results.get(0).median()) + "ms，第 450 页（from=9000）"
-                        + num(last) + "ms，放大 " + String.format(Locale.ROOT, "%.1f", last / base)
-                        + " 倍——深翻页的成本不是\"多传了 20 条\"，而是每个分片多吐了 9000 条")
+        // 结论必须由本轮实测决定：这台机器上 2 万条 / 3 分片时，from=9000 与 from=0 的 took
+        // 常常只差 1–3ms，落在 1ms 分辨率与缓存抖动里。写死「放大 N 倍」会在实测反序时自相矛盾。
+        String verdict = amplified
+                ? "第 1 页 " + baseText + "ms，第 450 页（from=9000）" + num(last) + "ms，放大 "
+                        + String.format(Locale.ROOT, "%.1f", ratio)
+                        + " 倍——深翻页的成本不是\"多传了 20 条\"，而是每个分片多吐了 9000 条"
+                : "第 1 页 " + baseText + "ms，第 450 页（from=9000）" + num(last) + "ms，两者只差 "
+                        + num(Math.abs(last - base)) + "ms —— 落在 took 的 1ms 分辨率与缓存抖动里，"
+                        + "本机 2 万条看不出明显放大；机制上每个分片仍要吐 from+size 条候选，数据量上去才会显现";
+
+        return LevelResult.builder(verdict)
                 .metrics(
-                        new Metric("from=0", num(results.get(0).median()) + " ms", null),
-                        new Metric("from=9000", num(last) + " ms", null),
-                        new Metric("放大倍数", String.format(Locale.ROOT, "%.1f", last / base) + "×", null),
+                        new Metric("from=0", baseText + " ms", "3 轮中位 · took；0 表示 <1ms"),
+                        new Metric("from=9000", num(last) + " ms", "3 轮中位 · took"),
+                        new Metric("放大倍数",
+                                amplified ? String.format(Locale.ROOT, "%.1f", ratio) + "×" : "未测出（噪声内）",
+                                "本轮实测；不足 1.5 倍就不下结论"),
                         new Metric("9980+20=10000", atLimitOk ? "通过" : "异常被拒", "上限是小于等于"),
                         new Metric("9990+20=10010", limitError.isEmpty() ? "未触发（异常）" : "被拒绝",
                                 "index.max_result_window"))
-                .chart(new BarChartData(chartItems, "ms（中位数）", "3 轮采样取中位数，已丢弃 1 轮预热"))
-                .json(Json.map("samples", sampleRows, "limitError", limitError))
+                .chart(new BarChartData(chartItems, "ms（中位数）", "3 轮采样取中位数；采样前 from=0/9000 各预热一次，不计入样本"))
+                .json(Json.map("samples", sampleRows, "limitError", limitError,
+                        "amplified", amplified, "ratio", ratio))
                 .notes(
-                        "3 分片 × (from+size) 条候选参与堆排序，这就是深翻页慢的机制；分片越多，放大越明显。",
+                        "3 分片 × (from+size) 条候选参与堆排序，这是深翻页的机制成本；分片越多，放大越明显 —— "
+                                + "但机制成立不等于本机能测出来，2 万条的数据量下差异只有几毫秒。",
                         atLimitOk
                                 ? "9980+20 恰好等于 10000，通过 —— 上限是「小于等于」，卡在边界不报错。"
                                 : "9980+20 本应等于 10000 却被拒，先检查 index.max_result_window 是否被改过。",

@@ -446,21 +446,40 @@ export const LEVEL_CALLS: Record<string, CallSpec[]> = {
     },
   ],
   'm6-2': [
+    { method: 'POST', path: '/eslab-products-v2/_pit?keep_alive=1m', note: '开一个 PIT：整个翻页过程共用同一份快照' },
+    {
+      method: 'POST',
+      path: '/_search',
+      note: '定位：from=0 / 5000 / 9900 各查一次，每片候选 = from+size',
+      dsl: 'pit + from + size=100 + sort price, _shard_doc',
+      repeat: '3 个起点 × 5 轮',
+    },
+    {
+      method: 'POST',
+      path: '/_search',
+      note: '游标翻页：只带上一页最后一条的 sort 值，不带 from',
+      dsl: 'pit + search_after + size=100',
+      repeat: '12 页 × 5 轮',
+    },
     {
       method: 'POST',
       path: '/eslab-products-v2/_search',
-      note: '对照组：from+size 取第 901 条起',
-      body: { from: 900, size: 100, sort: [{ price: 'asc' }, { sku: 'asc' }] },
+      note: '越界对照：from=15000 超过 10000 窗口，返回 400',
+      body: { from: 15000, size: 100, sort: [{ price: 'asc' }, { sku: 'asc' }], _source: ['sku'] },
     },
-    { method: 'POST', path: '/eslab-products-v2/_pit?keep_alive=1m', note: '开一个 PIT：给这次翻页一个固定的索引快照' },
-    { method: 'POST', path: '/_search', note: '带 pit + search_after 往后翻，每页都只读一页', repeat: '多页' },
-    { method: 'DELETE', path: '/_pit', note: '关掉 PIT，释放快照' },
+    { method: 'DELETE', path: '/_pit', note: '关闭 PIT，返回 num_freed；open_contexts 回到基线' },
+    {
+      method: 'POST',
+      path: '/_search',
+      note: '用刚关闭的 PIT 再查一次，确认 404 —— 上下文是真的释放了',
+      cond: '预期 404',
+    },
   ],
   'm6-3': [
     {
       method: 'POST',
       path: '/eslab-products-v2/_search',
-      note: 'profile: true，拿到每个查询节点的耗时',
+      note: 'profile: true，拿到 query 树；collector 与 fetch 分别在另外两段（fetch 在分片级）',
       body: {
         size: 10,
         profile: true,
