@@ -37,6 +37,8 @@ public class LabIndexes {
     public static final String V4 = "eslab-goods-v4";
     public static final String V5 = "eslab-goods-v5";
     public static final String V6 = "eslab-goods-v6";
+    /** m9-6：同义词放在索引期的对照索引，用来比「索引期重灌 vs 查询期只切别名」 */
+    public static final String SYN_IDX = "eslab-goods-syn-idx";
     public static final String SEARCH = "eslab-goods-search";
     public static final String OPS = "eslab-goods-ops";
     /** M1-M6 核心操作小关卡的独立、可随时复位的数据集。 */
@@ -192,6 +194,9 @@ public class LabIndexes {
                 "查询期同义词；源是别名当前指向");
 
         // L2 专题数据
+        index(SYN_IDX, "m9", "m9-6", Lifecycle.PERSISTENT, ResetCost.SLOW,
+                Source.REINDEX_V2, DOCS, this::synIdxDefinition, List.of(), true,
+                "同义词放在索引期（analyzer 上），用来对照 v6 的查询期方案");
         index(SEARCH, "m9", "m9-1", Lifecycle.PERSISTENT, ResetCost.SLOW,
                 Source.REINDEX_V2, DOCS, this::searchDefinition, List.of(), true,
                 "search_as_you_type + completion，m9-1..m9-5 共用");
@@ -348,6 +353,30 @@ public class LabIndexes {
                                 "filter", List.of("lowercase", "goods_synonyms")))));
         Map<String, Object> title = obj(properties(def).get("title"));
         title.put("search_analyzer", "goods_syn_search");
+        return def;
+    }
+
+    /**
+     * m9-6 对照索引：同义词挂在 title 的 **索引期** analyzer 上。
+     * 与 v6 的唯一差别就是「synonym 还是 synonym_graph、放 analyzer 还是 search_analyzer」。
+     */
+    public Map<String, Object> synIdxDefinition() {
+        Map<String, Object> def = v4Definition();
+        obj(def.get("settings")).put("analysis", Json.map(
+                "filter", Json.map(
+                        "goods_synonyms_idx", Json.map(
+                                "type", "synonym",
+                                "synonyms", List.of(
+                                        "蓝牙耳机, TWS, 真无线",
+                                        "头戴耳机, 头戴式耳机",
+                                        "移动电源, 充电宝"))),
+                "analyzer", Json.map(
+                        "goods_syn_index", Json.map(
+                                "type", "custom",
+                                "tokenizer", "ik_smart",
+                                "filter", List.of("lowercase", "goods_synonyms_idx")))));
+        Map<String, Object> title = obj(properties(def).get("title"));
+        title.put("analyzer", "goods_syn_index");
         return def;
     }
 

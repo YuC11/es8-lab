@@ -6422,10 +6422,10 @@
         {
           "id": "m9-2",
           "title": "短语、顺序与前缀：召回是怎么变窄的",
-          "objective": "理解 match / match_phrase / slop 的收紧关系，以及前缀查询的代价",
+          "objective": "用同一个串把「词出现 / 相邻 / 顺序 / 前缀 / 包含」五种语义的召回差异压实",
           "hook": "搜「蓝牙耳机」和「耳机蓝牙」，结果一样吗？",
           "predict": "把词序颠倒，slop 从 0 放宽到 3，命中会从 0 变成多少？",
-          "brief": "本关用同一组字段做六次查询：match、match_phrase、颠倒词序的 phrase（slop 0 与 slop 3）、prefix、以及前导通配 wildcard。实测 match 3,790 条、phrase 1,303 条、slop 0 为 0 条、slop 3 为 47 条。",
+          "brief": "同一个串「蓝牙耳机」跑六次：match 3,788 → match_phrase 1,301（34.3%）→ 逆序 slop 0 只有 139、slop 3 回到 1,348；prefix 是「以它开头」，本机 0 条（标题都以品牌开头），而前后通配 wildcard 是「包含」，命中 1,301 条。五个数一起看，才知道「收紧」到底收在哪。耗时一律 5 轮 took 中位，本机全是 0–2ms，所以结论落在召回语义上，不吹「快几倍」。",
           "deep": [
             {
               "type": "p",
@@ -6507,28 +6507,10 @@
           "pitfall": "以为 slop 是「允许中间隔 N 个字符」。它是词项位置的可移动距离，对中文分词后的结果更容易产生反直觉的结果。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "六次查询并列，输出命中数与 took，并标注各自的语义约束",
-              "kind": "level"
+              "desc": "同一个串六次：match / match_phrase / 逆序 slop0 / 逆序 slop3 / prefix / 前后通配，各 5 轮 took 中位"
             },
             {
-              "label": "自己收紧一次",
-              "desc": "把 slop 从 3 改成 0，观察命中归零",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-search/_search",
-              "body": {
-                "size": 0,
-                "track_total_hits": true,
-                "query": {
-                  "match_phrase": {
-                    "title": {
-                      "query": "降噪 蓝牙",
-                      "slop": 0
-                    }
-                  }
-                }
-              }
+              "desc": "对比 prefix（0 条，以它开头）与 wildcard（1,301 条，包含），确认「前缀」不等于「包含」"
             }
           ],
           "probes": [
@@ -6536,8 +6518,6 @@
               "task": "同一个词，宽松匹配",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "命中数",
-              "expect": "3,790 条 —— 只要两个词都出现就算。",
               "body": {
                 "size": 0,
                 "track_total_hits": true,
@@ -6546,14 +6526,14 @@
                     "title": "蓝牙耳机"
                   }
                 }
-              }
+              },
+              "watch": "命中数",
+              "expect": "约 3,788 条：两个词出现即可，顺序无关。"
             },
             {
               "task": "收紧成短语",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "命中数",
-              "expect": "1,303 条 —— 只有相邻且同序才算，召回降到三分之一。",
               "body": {
                 "size": 0,
                 "track_total_hits": true,
@@ -6562,29 +6542,66 @@
                     "title": "蓝牙耳机"
                   }
                 }
-              }
+              },
+              "watch": "命中数掉到多少",
+              "expect": "约 1,301 条（约 34%）：必须相邻同序。"
             },
             {
-              "task": "颠倒词序再放宽",
+              "task": "颠倒词序 + slop 0",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "命中数",
-              "expect": "47 条。把 slop 改成 0 就是 0 条 —— 顺序约束的真实代价。",
               "body": {
                 "size": 0,
                 "track_total_hits": true,
                 "query": {
                   "match_phrase": {
                     "title": {
-                      "query": "降噪 蓝牙",
+                      "query": "耳机 蓝牙",
+                      "slop": 0
+                    }
+                  }
+                }
+              },
+              "watch": "是否接近 0",
+              "expect": "约 139 条，不是 0：有些标题里「耳机」确实出现在「蓝牙」之前。"
+            },
+            {
+              "task": "同一个逆序查询放宽到 slop 3",
+              "method": "POST",
+              "path": "/eslab-goods-search/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "match_phrase": {
+                    "title": {
+                      "query": "耳机 蓝牙",
                       "slop": 3
                     }
                   }
                 }
-              }
+              },
+              "watch": "命中数怎么变",
+              "expect": "回到约 1,348 条 —— slop 是「允许移动几次位置」，不是「隔几个字」。"
+            },
+            {
+              "task": "prefix 与 wildcard 的语义差",
+              "method": "POST",
+              "path": "/eslab-goods-search/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "prefix": {
+                    "title.keyword": "蓝牙耳机"
+                  }
+                }
+              },
+              "watch": "命中数",
+              "expect": "0 条：prefix 要求「以该串开头」，而标题都以品牌开头；换成 wildcard \"*蓝牙耳机*\" 才有 1,301 条。"
             }
           ],
-          "takeaway": "match 只管词出现、phrase 要求相邻同序、slop 放宽位置；前缀查询的代价随词典规模增长",
+          "takeaway": "match → phrase → slop 是三条不同的约束；prefix 是「开头」，wildcard 才是「包含」",
           "next": "m9-3",
           "prereq": {
             "cluster": true,
@@ -6603,10 +6620,10 @@
         {
           "id": "m9-3",
           "title": "function_score：让业务信号参与排序",
-          "objective": "在文本相关性之上叠加时间、销量、状态等业务权重",
+          "objective": "逐个启用三个业务信号，用同一个文档的 explain 分数算出各自贡献",
           "hook": "搜索「蓝牙耳机」，排在前面的是最像的，还是最值得卖的？",
           "predict": "同一批结果，加上三个业务信号之后，Top10 里还有几条留在原位？",
-          "brief": "本关先跑一次纯 BM25 的 multi_match 取 Top10，再加入三个函数：上架时间的高斯衰减、销量的对数加权、在售状态的加权，然后对比两次排序。实测 Top10 完全换了一批 —— 最高分从 10.95 涨到 61.07。",
+          "brief": "先取基线 Top1 的那个文档（华为 护眼无线蓝牙耳机），然后把三个函数**逐个**加上去，用 _explain 读同一个文档的分数：BM25 给 10.820；只加上新（30 天窗口）变成 0.000 —— 因为语料最新也是几个月前，窗口根本没盖住数据；把窗口放宽到 365 天才回到 19.530；只加销量（log1p）是 30.275；只加在售仍是 10.820（这个文档 status≠1，没有命中该函数）；三个全开 30.275。命中数始终没变，Top10 只与基线重合 1 条。",
           "deep": [
             {
               "type": "p",
@@ -6682,49 +6699,19 @@
           "pitfall": "把 functions 里的 filter 当成结果过滤；或者不加 log1p 这类压缩，让销量单一维度主导排序。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "先跑基线 Top10，再跑加权 Top10，对比重合数与 explain 的函数拆分",
-              "kind": "level"
+              "desc": "基线 → 只加上新（30d 与 365d 两个窗口）→ 只加销量 → 只加在售 → 三个全开，五次 explain 同一文档"
             },
             {
-              "label": "自己看一次打分",
-              "desc": "对 Top1 发 explain，读 product of 下面的函数项",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-search/_search",
-              "body": {
-                "size": 3,
-                "query": {
-                  "function_score": {
-                    "query": {
-                      "match": {
-                        "title": "蓝牙耳机"
-                      }
-                    },
-                    "functions": [
-                      {
-                        "field_value_factor": {
-                          "field": "sales",
-                          "modifier": "log1p",
-                          "factor": 0.1
-                        }
-                      }
-                    ],
-                    "boost_mode": "multiply"
-                  }
-                }
-              }
+              "desc": "对比命中数是否变化、Top10 重合度，并读 explain 的 product of 结构"
             }
           ],
           "probes": [
             {
-              "task": "基线的最高分",
+              "task": "基线（纯 BM25）Top1 的分数",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "max_score 与 Top1",
-              "expect": "最高分约 10.95，Top1 是纯文本最匹配的那条。",
               "body": {
-                "size": 10,
+                "size": 1,
                 "track_total_hits": true,
                 "query": {
                   "multi_match": {
@@ -6736,16 +6723,16 @@
                     "type": "best_fields"
                   }
                 }
-              }
+              },
+              "watch": "max_score",
+              "expect": "约 10.82：只有文本相关性。"
             },
             {
-              "task": "加权后的最高分",
+              "task": "只加销量信号（log1p）",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "max_score 与命中数",
-              "expect": "分数明显抬高，命中数不变 —— 只改排序。",
               "body": {
-                "size": 10,
+                "size": 1,
                 "track_total_hits": true,
                 "query": {
                   "function_score": {
@@ -6755,7 +6742,44 @@
                         "fields": [
                           "title^2",
                           "description"
-                        ]
+                        ],
+                        "type": "best_fields"
+                      }
+                    },
+                    "functions": [
+                      {
+                        "field_value_factor": {
+                          "field": "sales",
+                          "modifier": "log1p",
+                          "factor": 0.1
+                        }
+                      }
+                    ],
+                    "score_mode": "sum",
+                    "boost_mode": "multiply"
+                  }
+                }
+              },
+              "watch": "max_score 与命中数",
+              "expect": "最高分升到 30 上下，命中数不变 —— 只改排序，不改命中集。"
+            },
+            {
+              "task": "只加上架时间 gauss（30 天窗口）",
+              "method": "POST",
+              "path": "/eslab-goods-search/_search",
+              "body": {
+                "size": 1,
+                "track_total_hits": true,
+                "query": {
+                  "function_score": {
+                    "query": {
+                      "multi_match": {
+                        "query": "蓝牙耳机",
+                        "fields": [
+                          "title^2",
+                          "description"
+                        ],
+                        "type": "best_fields"
                       }
                     },
                     "functions": [
@@ -6768,45 +6792,57 @@
                           }
                         },
                         "weight": 2
-                      },
-                      {
-                        "field_value_factor": {
-                          "field": "sales",
-                          "modifier": "log1p",
-                          "factor": 0.1
-                        }
-                      },
-                      {
-                        "filter": {
-                          "term": {
-                            "status": 1
-                          }
-                        },
-                        "weight": 1.5
                       }
                     ],
                     "score_mode": "sum",
                     "boost_mode": "multiply"
                   }
                 }
-              }
+              },
+              "watch": "最高分是不是塌到接近 0",
+              "expect": "接近 0：语料最新也在几个月前，30 天窗口把分数压没了。参数要对着数据分布调。"
             },
             {
-              "task": "确认命中数没变",
+              "task": "把窗口放宽到 365 天",
               "method": "POST",
-              "path": "/eslab-goods-search/_count",
-              "watch": "count",
-              "expect": "与基线一致。function_score 不改变谁能被搜到。",
+              "path": "/eslab-goods-search/_search",
               "body": {
+                "size": 1,
+                "track_total_hits": true,
                 "query": {
-                  "match": {
-                    "title": "蓝牙耳机"
+                  "function_score": {
+                    "query": {
+                      "multi_match": {
+                        "query": "蓝牙耳机",
+                        "fields": [
+                          "title^2",
+                          "description"
+                        ],
+                        "type": "best_fields"
+                      }
+                    },
+                    "functions": [
+                      {
+                        "gauss": {
+                          "created_at": {
+                            "origin": "now-365d",
+                            "scale": "365d",
+                            "decay": 0.5
+                          }
+                        },
+                        "weight": 2
+                      }
+                    ],
+                    "score_mode": "sum",
+                    "boost_mode": "multiply"
                   }
                 }
-              }
+              },
+              "watch": "最高分回到多少",
+              "expect": "约 19.5：窗口盖住数据后才有渐变。"
             }
           ],
-          "takeaway": "业务信号叠加在 BM25 之上，只改排序不改命中；调完必须用 explain 验证每一分的来源",
+          "takeaway": "逐个启用才看得出谁在起作用；衰减窗口要对齐数据分布，否则信号会被压成 0",
           "next": "m9-4",
           "prereq": {
             "cluster": true,
@@ -6825,10 +6861,10 @@
         {
           "id": "m9-4",
           "title": "高亮与折叠：结果怎么展示",
-          "objective": "让用户看懂「为什么这条被搜到」，并让同一品牌只出现一次",
+          "objective": "分清三个请求各自的 total，并把「0 高亮」与「品牌基数」两件事实测出来",
           "hook": "搜索结果里为什么有的词是粗体？那是 ES 帮你标出来的。",
           "predict": "折叠之后返回 5 条，hits.total 会变成 5 吗？",
-          "brief": "本关做三件事：高亮标题与描述（5 条全部命中）、按品牌折叠（返回 5 条、5 个品牌，但 total 仍是 20,000）、以及折叠 + inner_hits（每个品牌再带一条「最贵的那个」）。",
+          "brief": "高亮查询（match title）total 3,788，5 条全部带 <em>；换成「查 description、只开 title 高亮」，5 条全部没有高亮 —— 高亮只对「该字段本身命中」生效。折叠查询 total 20,000、返回 5 条 5 个品牌；inner_hits 版本 total 也是 20,000，3 组各带 1 条。品牌真实数量用 cardinality 独立算出是 30 个，而折叠只返回 5 条 —— 折叠既不改统计，也不等于聚合。",
           "deep": [
             {
               "type": "p",
@@ -6904,32 +6940,10 @@
           "pitfall": "以为 collapse 会减少命中总数，或者用 text 字段做 collapse（会直接报错）。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "分别跑高亮、折叠、折叠 + inner_hits 三次查询，对比返回条数与 total",
-              "kind": "level"
+              "desc": "高亮（含 0 高亮对照）/ 折叠 / 折叠+inner_hits 三次查询，分别记录各自的 total 与返回条数"
             },
             {
-              "label": "自己换一个字段折叠",
-              "desc": "按 category 折叠，看品牌数变成几个",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-search/_search",
-              "body": {
-                "size": 5,
-                "track_total_hits": true,
-                "collapse": {
-                  "field": "category"
-                },
-                "sort": [
-                  {
-                    "sales": "desc"
-                  }
-                ],
-                "_source": [
-                  "title",
-                  "category"
-                ]
-              }
+              "desc": "用 cardinality 单独算品牌基数，与折叠返回的品牌数对照"
             }
           ],
           "probes": [
@@ -6937,10 +6951,9 @@
               "task": "高亮返回了什么",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "hits 里的 highlight 字段",
-              "expect": "每条都有 highlight.title，命中的词被 <em> 包住。",
               "body": {
                 "size": 3,
+                "track_total_hits": true,
                 "query": {
                   "match": {
                     "title": "蓝牙耳机"
@@ -6948,17 +6961,42 @@
                 },
                 "highlight": {
                   "fields": {
-                    "title": {}
+                    "title": {
+                      "number_of_fragments": 1
+                    }
                   }
                 }
-              }
+              },
+              "watch": "total 与 highlight 字段",
+              "expect": "total 约 3,788，每条都带 <em> 标记。"
+            },
+            {
+              "task": "查到了却没有高亮",
+              "method": "POST",
+              "path": "/eslab-goods-search/_search",
+              "body": {
+                "size": 3,
+                "track_total_hits": true,
+                "query": {
+                  "match": {
+                    "description": "降噪"
+                  }
+                },
+                "highlight": {
+                  "fields": {
+                    "title": {
+                      "number_of_fragments": 1
+                    }
+                  }
+                }
+              },
+              "watch": "有没有 highlight 字段",
+              "expect": "命中约 7,444 条，但 title 没有 <em>：查询命中的是 description，高亮只开在 title。"
             },
             {
               "task": "折叠后的条数与总数",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "返回条数、品牌去重数、hits.total",
-              "expect": "返回 5 条、5 个不同品牌，但 total 仍是 20,000 —— 折叠只影响返回。",
               "body": {
                 "size": 5,
                 "track_total_hits": true,
@@ -6970,48 +7008,34 @@
                 },
                 "sort": [
                   {
-                    "sales": "desc"
+                    "sales": {
+                      "order": "desc"
+                    }
                   }
-                ],
-                "_source": [
-                  "brand",
-                  "sales"
                 ]
-              }
+              },
+              "watch": "返回条数与 total",
+              "expect": "返回 5 条（5 个品牌），total 仍是 20,000 —— 折叠只影响返回。"
             },
             {
-              "task": "折叠 + 每组代表文档",
+              "task": "品牌到底有多少个",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "inner_hits 的组数",
-              "expect": "每组 1 条，就是该品牌里价格最高的那条。",
               "body": {
-                "size": 3,
-                "track_total_hits": true,
-                "query": {
-                  "match_all": {}
-                },
-                "collapse": {
-                  "field": "brand",
-                  "inner_hits": {
-                    "name": "top_by_price",
-                    "size": 1,
-                    "sort": [
-                      {
-                        "price": "desc"
-                      }
-                    ]
+                "size": 0,
+                "aggs": {
+                  "b": {
+                    "cardinality": {
+                      "field": "brand"
+                    }
                   }
-                },
-                "sort": [
-                  {
-                    "sales": "desc"
-                  }
-                ]
-              }
+                }
+              },
+              "watch": "聚合值",
+              "expect": "30 个。折叠只返回 5 条，别把它当品牌总数。"
             }
           ],
-          "takeaway": "高亮让结果可解释，折叠让同品牌只出现一次；两者都不改变命中集与 total",
+          "takeaway": "三个请求的 total 要分开看；高亮依赖字段本身命中；折叠≠聚合，品牌数要用 cardinality 算",
           "next": "m9-5",
           "prereq": {
             "cluster": true,
@@ -7030,10 +7054,10 @@
         {
           "id": "m9-5",
           "title": "补全与纠错：输入框里的搜索",
-          "objective": "分清 suggester、completion、search_as_you_type 各自能解决什么",
+          "objective": "三种补全机制各自的适用面，以及中英文在分析器上的差别",
           "hook": "用户打了「蓝牙耳几」，输入框该给什么？",
           "predict": "completion 用「小米」有候选，用「蓝牙」为什么变成 0？",
-          "brief": "本关把三种能力放在一起实测：term / phrase suggester 对中文给出 0 个候选；completion 用「小米」有 5 个、用「蓝牙」为 0（只认串首）；`search_as_you_type` + `bool_prefix` 用「蓝牙耳」命中 3,790 条，而 `match_phrase_prefix` 只有 1,303 条。",
+          "brief": "term / phrase suggester 对中文「蓝牙耳几」都给 0 个候选（ik 分词后词项太短，凑不出编辑距离候选）；completion 用「小米」有 5 个、用「蓝牙」是 0（只认串首）；bool_prefix 用「蓝牙耳」命中 3,788 条，match_phrase_prefix 只有 1,301 条。中英对照：english 分析器把 Earphones 还原成 earphon，standard 不还原。completion 的 _score 是 1.0 这样的固定值，不是相关性分。",
           "deep": [
             {
               "type": "p",
@@ -7105,28 +7129,10 @@
           "pitfall": "以为 completion 能匹配字符串中段；或者给长文本字段开 search_as_you_type，索引体积翻倍而收益很小。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "六次对照：term/phrase suggester、completion 两种前缀、bool_prefix、phrase_prefix",
-              "kind": "level"
+              "desc": "六次补全对照：term/phrase suggester、completion 两种前缀、bool_prefix、phrase_prefix"
             },
             {
-              "label": "自己试一个前缀",
-              "desc": "换「声阔」「耳机」分别试 completion",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-search/_search",
-              "body": {
-                "size": 0,
-                "suggest": {
-                  "comp": {
-                    "prefix": "声阔",
-                    "completion": {
-                      "field": "title_suggest",
-                      "size": 5
-                    }
-                  }
-                }
-              }
+              "desc": "中英分词对照 + 读 completion 的 _score + 试一次 _reload_search_analyzers"
             }
           ],
           "probes": [
@@ -7134,8 +7140,6 @@
               "task": "completion 从串首匹配",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "options 数量与首条候选",
-              "expect": "有候选，且候选串都以「小米」开头。",
               "body": {
                 "size": 0,
                 "suggest": {
@@ -7143,18 +7147,18 @@
                     "prefix": "小米",
                     "completion": {
                       "field": "title_suggest",
-                      "size": 3
+                      "size": 5
                     }
                   }
                 }
-              }
+              },
+              "watch": "候选数与第一个候选",
+              "expect": "5 个候选，第一个是完整标题 —— 前缀必须从候选串开头算起。"
             },
             {
               "task": "中段词匹配不到",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "options 数量",
-              "expect": "0 个。这就是 completion 与 bool_prefix 最实际的区别。",
               "body": {
                 "size": 0,
                 "suggest": {
@@ -7162,18 +7166,18 @@
                     "prefix": "蓝牙",
                     "completion": {
                       "field": "title_suggest",
-                      "size": 3
+                      "size": 5
                     }
                   }
                 }
-              }
+              },
+              "watch": "候选数",
+              "expect": "0 个：标题里「蓝牙」不在开头，completion 不认中段。"
             },
             {
               "task": "bool_prefix 的召回",
               "method": "POST",
               "path": "/eslab-goods-search/_search",
-              "watch": "hits.total.value",
-              "expect": "3,790 条，比 match_phrase_prefix 的 1,303 条宽得多。",
               "body": {
                 "size": 0,
                 "track_total_hits": true,
@@ -7188,10 +7192,23 @@
                     ]
                   }
                 }
-              }
+              },
+              "watch": "命中数",
+              "expect": "约 3,788 条，比 match_phrase_prefix（约 1,301）宽：它不要求整串连续。"
+            },
+            {
+              "task": "中英分词对照：english vs standard",
+              "method": "POST",
+              "path": "/_analyze",
+              "body": {
+                "analyzer": "english",
+                "text": "Bluetooth Earphones"
+              },
+              "watch": "token 是否被还原词干",
+              "expect": "bluetooth / earphon：english 把 earphones 还原成词干；换成 standard 就是 bluetooth / earphones。"
             }
           ],
-          "takeaway": "中文纠错不能靠 suggester；completion 只认开头，词中间补全要用 search_as_you_type + bool_prefix",
+          "takeaway": "completion 只认串首、_score 是固定值；中文纠错别指望 suggester；bool_prefix 才是词中补全",
           "next": "m9-6",
           "prereq": {
             "cluster": true,
@@ -7210,10 +7227,10 @@
         {
           "id": "m9-6",
           "title": "同义词上线：一次完整的索引变更",
-          "objective": "把同义词变更走完「建新索引 → reindex → 切别名」的全流程",
+          "objective": "把同义词上线走完，并对比「查询期」与「索引期」两种放法的成本与召回",
           "hook": "加了同义词，为什么「TWS」还是搜不到蓝牙耳机？",
           "predict": "切换别名前后，同一条查询的命中数会差多少？",
-          "brief": "本关给商品索引加一套查询期同义词（`蓝牙耳机 / TWS / 真无线`）。建新索引 v6、写自定义分析器、从别名指向的 v4 搬 2 万条，再原子切换。实测：切换前「TWS」命中 0 条，切换后 1,303 条，而客户端那行查询语句一个字都没改。",
+          "brief": "切换前「TWS」命中 0 条，切到 v6（查询期 synonym_graph）后 1,301 条。对照索引 syn-idx 把同一条规则放到**索引期**：查「TWS」同样是 1,301 条，但它要重灌 20,000 条（本机 1.3s）；而查「蓝牙耳机」两边不同 —— 查询期 1,301 条、索引期 3,788 条，因为索引期在写入时就把整组同义词塞进了倒排。另外试了 _reload_search_analyzers：本机规则是内联的，它只重读文件，规则实际没变。",
           "deep": [
             {
               "type": "p",
@@ -7281,20 +7298,10 @@
           "pitfall": "以为改同义词只需重启应用；或者以为 `synonym_graph` 在索引期会直接报错 —— 它不会，但会让你每次改规则都重灌数据。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "复位别名到 v4 → 测切换前命中 → 建 v6 + 重灌 → 切别名 → 测切换后命中",
-              "kind": "level"
+              "desc": "归位 v4 → 测切换前命中 → 建 v6（查询期）→ 切别名 → 测切换后命中"
             },
             {
-              "label": "自己看一次展开",
-              "desc": "用 analyzer 参数显式指定查询期分析器",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-v6/_analyze",
-              "body": {
-                "analyzer": "goods_syn_search",
-                "text": "充电宝"
-              }
+              "desc": "建 syn-idx（索引期）并计时；对比两种放法在 TWS / 蓝牙耳机 上的命中与重建成本"
             }
           ],
           "probes": [
@@ -7302,26 +7309,28 @@
               "task": "查询期展开成什么",
               "method": "POST",
               "path": "/eslab-goods-v6/_analyze",
-              "watch": "tokens",
-              "expect": "会出现 蓝牙 / 真 / tws / 耳机 / 无线 等词项 —— 这就是「展开」。",
               "body": {
                 "analyzer": "goods_syn_search",
                 "text": "TWS"
-              }
+              },
+              "watch": "token 列表",
+              "expect": "蓝牙 / 真 / tws / 耳机 / 无线：查询串被展开成一组同义词项。"
             },
             {
-              "task": "别名现在指向谁",
-              "method": "GET",
-              "path": "/_cat/aliases/eslab-goods?format=json&h=alias,index,is_write_index",
-              "watch": "写索引",
-              "expect": "eslab-goods-v6。"
+              "task": "索引期索引的字段分析结果",
+              "method": "POST",
+              "path": "/eslab-goods-syn-idx/_analyze",
+              "body": {
+                "field": "title",
+                "text": "TWS"
+              },
+              "watch": "token 列表与 v6 的差别",
+              "expect": "同样展开成一组词项 —— 但这是在写入时做的，索引更大、召回更宽。"
             },
             {
               "task": "切换之后能搜到吗",
               "method": "POST",
               "path": "/eslab-goods/_search",
-              "watch": "命中数",
-              "expect": "1,303 条。切换之前这条查询是 0 条。",
               "body": {
                 "size": 0,
                 "track_total_hits": true,
@@ -7330,10 +7339,19 @@
                     "title": "TWS"
                   }
                 }
-              }
+              },
+              "watch": "命中数",
+              "expect": "约 1,301 条：别名已指向 v6，客户端那行查询语句一个字都没改。"
+            },
+            {
+              "task": "别名现在指向谁",
+              "method": "GET",
+              "path": "/_cat/aliases/eslab-goods?format=json&h=alias,index,is_write_index",
+              "watch": "写目标",
+              "expect": "eslab-goods-v6。如果看到 v4，说明本关还没跑或跑失败在中途。"
             }
           ],
-          "takeaway": "同义词上线 = 建新索引 + reindex + 原子切别名；查询期同义词改规则不必重灌数据（前提是用文件）",
+          "takeaway": "同义词放查询期：只切别名；放索引期：召回更宽但要重灌；内联规则 reload 无效，只能重建",
           "next": "m10-1",
           "prereq": {
             "cluster": true,

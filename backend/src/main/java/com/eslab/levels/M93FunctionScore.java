@@ -22,6 +22,9 @@ import java.util.Map;
  *
  * 纯文本相关性回答「这条文档和 query 有多像」，function_score 让业务信号参与排序：
  * 上架越新、卖得越多、还在售，就往前排 —— 但依然不改「谁算命中」。
+ *
+ * 本关的关键是「逐个启用」：基线 → 只加上新 → 只加销量 → 只加在售 → 三个全开。
+ * 用同一个文档的 _explain 分数，把每个函数各自贡献了多少分算出来，而不是一次性全开看个总分。
  */
 @Component
 public class M93FunctionScore implements LevelModule {
@@ -51,94 +54,133 @@ public class M93FunctionScore implements LevelModule {
                 "fields", List.of("title^2", "description"),
                 "type", "best_fields"));
 
-        // @focus-start 三个业务信号：上架时间衰减、销量对数加权、在售加权
-        Map<String, Object> fsQuery = Json.map("function_score", Json.map(
-                "query", baseQuery,
-                "functions", List.of(
-                        Json.map("gauss", Json.map("created_at", Json.map(
-                                        "origin", "now-30d", "scale", "30d", "decay", 0.5)),
-                                "weight", 2),
-                        Json.map("field_value_factor", Json.map(
-                                "field", "sales", "modifier", "log1p", "factor", 0.1)),
-                        Json.map("filter", Json.map("term", Json.map("status", 1)),
-                                "weight", 1.5)),
-                "score_mode", "sum",
-                "boost_mode", "multiply"));
+        // @focus-start 三个业务信号，各自可以单独启用
+        Map<String, Object> gauss = Json.map("gauss", Json.map("created_at", Json.map(
+                        "origin", "now-30d", "scale", "30d", "decay", 0.5)),
+                "weight", 2);
+        // 对照组：语料最新也是几个月前，30 天窗口会把老数据压成 0；把窗口放宽到一年才看得出「渐变」
+        Map<String, Object> gaussWide = Json.map("gauss", Json.map("created_at", Json.map(
+                        "origin", "now-365d", "scale", "365d", "decay", 0.5)),
+                "weight", 2);
+        Map<String, Object> fvf = Json.map("field_value_factor", Json.map(
+                "field", "sales", "modifier", "log1p", "factor", 0.1));
+        Map<String, Object> onSale = Json.map("filter", Json.map("term", Json.map("status", 1)),
+                "weight", 1.5);
         // @focus-end
 
-        JsonNode base = es.post("/" + SEARCH + "/_search", Json.map(
-                "size", 10, "track_total_hits", true, "query", baseQuery));
-        JsonNode boosted = es.post("/" + SEARCH + "/_search", Json.map(
-                "size", 10, "track_total_hits", true, "query", fsQuery));
+        Map<String, Object> onlyGauss = fs(baseQuery, List.of(gauss));
+        Map<String, Object> wideGauss = fs(baseQuery, List.of(gaussWide));
+        Map<String, Object> onlySales = fs(baseQuery, List.of(fvf));
+        Map<String, Object> onlyStatus = fs(baseQuery, List.of(onSale));
+        Map<String, Object> all = fs(baseQuery, List.of(gauss, fvf, onSale));
 
-        List<String> baseIds = ids(base);
-        List<String> fsIds = ids(boosted);
-        int overlap = 0;
-        for (String id : fsIds) if (baseIds.contains(id)) overlap++;
+        JsonNode base = search(baseQuery);
+        JsonNode boostAll = search(all);
 
-        Map<String, String> titles = titles(base);
-        titles.putAll(titles(boosted));
+        String docId = base.path("hits").path("hits").path(0).path("_id").asText("");
+        String docTitle = base.path("hits").path("hits").path(0).path("_source").path("title").asText("—");
+
+        // 同一个文档在五种组合下的得分：差值是各函数的贡献
+        double sBase = explainScore(docId, baseQuery);
+        double sGauss = explainScore(docId, onlyGauss);
+        double sWide = explainScore(docId, wideGauss);
+        double sSales = explainScore(docId, onlySales);
+        double sStatus = explainScore(docId, onlyStatus);
+        double sAll = explainScore(docId, all);
+
+        int overlap = overlap(base, boostAll);
 
         List<List<Object>> rows = new ArrayList<>();
-        for (int i = 0; i < Math.min(5, fsIds.size()); i++) {
-            rows.add(TableData.row(i + 1,
-                    titleOf(baseIds, titles, i),
-                    titleOf(fsIds, titles, i)));
-        }
+        rows.add(TableData.row("基线（纯 BM25）", score(sBase), "—", "只有文本相关性"));
+        rows.add(TableData.row("+ 上架 gauss(scale 30d)", score(sGauss),
+                delta(sGauss - sBase), "窗口太窄：语料最新也是几个月前，衰减到接近 0"));
+        rows.add(TableData.row("+ 上架 gauss(scale 365d)", score(sWide),
+                delta(sWide - sBase), "窗口对齐数据分布，才看得出「新旧有别」"));
+        rows.add(TableData.row("+ 销量 log1p(factor 0.1)", score(sSales),
+                delta(sSales - sBase), "log1p 压住长尾，避免爆款通吃"));
+        rows.add(TableData.row("+ 在售 filter(weight 1.5)", score(sStatus),
+                delta(sStatus - sBase), "命中 status=1 才加这一档"));
+        rows.add(TableData.row("三个全开（sum × multiply）", score(sAll),
+                delta(sAll - sBase), "score_mode=sum，boost_mode=multiply"));
 
-        String topId = fsIds.isEmpty() ? null : fsIds.get(0);
-        JsonNode explain = null;
-        String explainHint = "无结果，跳过 explain";
-        if (topId != null) {
-            explain = es.call("GET", "/" + SEARCH + "/_explain/" + topId,
-                    Json.map("query", fsQuery)).body();
-            explainHint = explain.path("explanation").path("description").asText("");
-        }
+        JsonNode explain = es.call("GET", "/" + SEARCH + "/_explain/" + docId,
+                Json.map("query", all)).body();
+        String explainHint = explain.path("explanation").path("description").asText("");
 
-        return LevelResult.builder("同一批命中、同样的 query，加入「上新 / 销量 / 在售」三个信号后，"
-                        + "Top10 里有 " + (10 - overlap) + " 条被换掉；explain 能看到每个函数各贡献了多少分")
+        boolean sameTotal = base.path("hits").path("total").path("value").asLong()
+                == boostAll.path("hits").path("total").path("value").asLong();
+
+        return LevelResult.builder("同一个文档（" + docTitle + "）：BM25 给 " + score(sBase)
+                        + "，只加上新变成 " + score(sGauss) + "，只加销量 " + score(sSales)
+                        + "，只加在售 " + score(sStatus) + "，三个全开 " + score(sAll)
+                        + "；而命中数" + (sameTotal ? "一条都没变" : "变了（不符合预期）")
+                        + " —— function_score 只改排序")
                 .metrics(
-                        new Metric("基线最高分", score(base.path("hits").path("max_score").asDouble(0)), "纯 BM25"),
-                        new Metric("加权后最高分", score(boosted.path("hits").path("max_score").asDouble(0)),
-                                "与原分相乘"),
-                        new Metric("Top10 重合", overlap + " / 10", "排序确实变了"),
-                        new Metric("命中数是否变化",
-                                base.path("hits").path("total").path("value").asLong()
-                                        == boosted.path("hits").path("total").path("value").asLong()
-                                        ? "未变" : "变了（不符合预期）",
-                                "function_score 只改排序"))
-                .table(TableData.of(List.of("排名", "基线", "加权后"), rows))
-                .json(Map.of("topId", topId == null ? "" : topId,
-                        "explain", explain == null ? Map.of() : explain,
-                        "functionScore", fsQuery))
+                        new Metric("基线分", score(sBase), "纯 BM25 给这个文档的分"),
+                        new Metric("上架信号（30d 窗口）", delta(sGauss - sBase),
+                                "把老数据压到接近 0：窗口没对上数据分布"),
+                        new Metric("上架信号（365d 窗口）", delta(sWide - sBase),
+                                "窗口放宽后才有渐变"),
+                        new Metric("销量信号贡献", delta(sSales - sBase), "log1p(sales) × 0.1"),
+                        new Metric("在售信号贡献", delta(sStatus - sBase), "filter status=1 × 1.5"),
+                        new Metric("三个全开", score(sAll), "score_mode=sum → multiply 到 BM25"),
+                        new Metric("Top10 与基线重合", overlap + " / 10",
+                                sameTotal ? "命中集不变，只有顺序变" : "命中集变了"))
+                .table(TableData.of(List.of("函数组合", "该文档得分", "相对基线", "说明"), rows))
+                .json(Json.map("topId", docId, "explain", explain,
+                        "functionScore", all, "scores", Json.map(
+                                "base", sBase, "gauss30d", sGauss, "gauss365d", sWide,
+                                "sales", sSales, "status", sStatus, "all", sAll)))
                 .notes(
-                        "gauss 的 scale 决定衰减速度：30d 表示「30 天前的文档分数衰减到 decay 指定的比例」",
+                        "逐个启用才有信息量：三个一起开只能看到一个总分，说不出谁在起作用、谁的权重过大",
+                        "gauss 的 scale 决定衰减速度：30d 表示「距离 origin 30 天时衰减到 decay 指定的比例」。本关第一行用 30d 窗口把老数据压到接近 0——"
+                                + "因为语料最新也是几个月前，窗口根本没盖住数据；换成 365d 才看得出渐变。参数要对着数据分布调，不是越小越好",
                         "field_value_factor 配 log1p 是为了压住销量长尾 —— 否则一个 10 万销量的爆款会把其他信号全部盖掉",
-                        "score_mode=sum 先把三个函数加起来，boost_mode=multiply 再乘到 BM25 分上；换一种组合排序会完全不同",
-                        "explain 里的「" + explainHint + "」说明这一分是怎么算出来的 —— 调相关性不能只靠猜")
+                        "score_mode=sum 先把函数值加起来，boost_mode=multiply 再乘到 BM25 上；换一种组合排序会完全不同，而命中集始终不变",
+                        "explain 里的「" + shortHint(explainHint) + "」说明这一分是怎么算出来的 —— 调相关性不能只靠猜")
                 .build();
     }
 
-    private List<String> ids(JsonNode d) {
-        List<String> out = new ArrayList<>();
-        for (JsonNode h : d.path("hits").path("hits")) out.add(h.path("_id").asText());
-        return out;
+    private Map<String, Object> fs(Map<String, Object> query, List<Map<String, Object>> functions) {
+        return Json.map("function_score", Json.map(
+                "query", query,
+                "functions", functions,
+                "score_mode", "sum",
+                "boost_mode", "multiply"));
     }
 
-    private Map<String, String> titles(JsonNode d) {
-        Map<String, String> out = new LinkedHashMap<>();
-        for (JsonNode h : d.path("hits").path("hits")) {
-            out.put(h.path("_id").asText(), h.path("_source").path("title").asText("—"));
+    private JsonNode search(Map<String, Object> query) {
+        return es.post("/" + SEARCH + "/_search", Json.map(
+                "size", 10, "track_total_hits", true, "query", query));
+    }
+
+    /** 用 _explain 拿某个文档在指定查询下的总分 */
+    private double explainScore(String docId, Map<String, Object> query) {
+        if (docId == null || docId.isEmpty()) return 0;
+        JsonNode r = es.call("GET", "/" + SEARCH + "/_explain/" + docId, Json.map("query", query)).body();
+        return r.path("explanation").path("value").asDouble(0);
+    }
+
+    private static int overlap(JsonNode a, JsonNode b) {
+        List<String> ids = new ArrayList<>();
+        for (JsonNode h : a.path("hits").path("hits")) ids.add(h.path("_id").asText());
+        int n = 0;
+        for (JsonNode h : b.path("hits").path("hits")) {
+            if (ids.contains(h.path("_id").asText())) n++;
         }
-        return out;
+        return n;
     }
 
-    private static String titleOf(List<String> ids, Map<String, String> titles, int i) {
-        if (i >= ids.size()) return "—";
-        return titles.getOrDefault(ids.get(i), ids.get(i));
+    private static String delta(double v) {
+        String s = String.format(Locale.ROOT, "%.3f", Math.abs(v));
+        return (v >= 0 ? "+" : "−") + s;
     }
 
     private static String score(double v) {
-        return String.format(Locale.ROOT, "%.2f", v);
+        return String.format(Locale.ROOT, "%.3f", v);
+    }
+
+    private static String shortHint(String s) {
+        return s.length() <= 80 ? s : s.substring(0, 80) + "…";
     }
 }
