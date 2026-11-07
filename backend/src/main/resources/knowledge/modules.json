@@ -2460,10 +2460,10 @@
         {
           "id": "m4-1",
           "title": "一个 _search 请求由什么组成",
-          "objective": "看懂请求体的两层结构和响应体的固定骨架",
+          "objective": "看懂请求体的两层结构与响应体骨架，并能说出每个响应字段由哪个参数控制",
           "hook": "查询写错不会报错，只会安静地返回你不想要的结果 —— 先学会读响应，才能判断它对不对。",
-          "predict": "不写 track_total_hits 时，total 会等于你库里的真实文档数吗？",
-          "brief": "`_search` 的请求体只有两类键：query 决定「查什么」，其余（size / from / _source / sort / aggs / track_total_hits）决定「怎么给」。响应体是固定骨架：took 是 ES 内部耗时、timed_out 是是否超时、_shards 是打到的分片副本数、hits.total 是命中数、hits.max_score 是本页最高分、hits.hits[] 里每条带 _score 与 _source。本关用同一份数据跑四组对照，只改 size 与 track_total_hits，看每个字段怎么变。",
+          "predict": "默认 total 是精确值吗？带 sort 的请求还有 score 吗？",
+          "brief": "`_search` 的请求体只有两类键：query 决定「查什么」，其余（size / from / _source / sort / aggs / track_total_hits）决定「怎么给」。本关跑六次请求（默认 / 精确总数 / 返回文档 / 裁剪字段 / 排序 / 聚合），把响应体逐字段对照回来源 —— 表格第 4 列写明「这个值取自哪一次请求」，因为同一张表里混多条请求的数、又不标来源，是读不出结论的。两个反直觉点都会实测到：`track_total_hits` 省略时 total 被截在 10000（relation=gte）；显式 `sort` 之后 ES 不再打相关性分，`max_score` 直接是 null。",
           "deep": [
             {
               "type": "p",
@@ -2543,65 +2543,86 @@
           "pitfall": "把 max_score: null 当成「查询失败」；或者看到 total 是 10000 就以为数据只有一万条 —— 那是默认上限，不是真实命中数。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "同一份数据跑四组对照：默认 / 精确总数 / 返回文档 / 裁剪字段，给出响应体逐字段对照表",
-              "kind": "level"
+              "desc": "六组对照：默认(size:0) / 精确 total / size:2 返回文档 / _source 裁剪 / 显式排序 / terms 聚合"
             },
             {
-              "label": "自己看一次原始响应",
-              "desc": "在控制台跑 size: 2 的 match_all，对照表格看 hits.hits 里的 _score 与 _source",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 2,
-                "track_total_hits": true,
-                "query": {
-                  "match_all": {}
-                }
-              }
+              "desc": "读回响应体 10 个字段，逐行标注「值来自哪条请求」；对比默认与精确 total 的 relation"
             }
           ],
           "probes": [
             {
-              "task": "不写 track_total_hits，只取总数",
+              "task": "默认与精确 total 差多少",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0
               },
-              "watch": "hits.total.value 与 relation 分别是什么",
-              "expect": "value 停在 10000、relation 是 gte —— 这是 ES 默认的成本保护，不是你的数据只有一万条。"
+              "watch": "hits.total 的 value 与 relation",
+              "expect": "10000 / gte。默认只保证到 10000，超过就不再数了。"
             },
             {
-              "task": "加上 track_total_hits: true 再数一次",
+              "task": "同一个查询加上 track_total_hits: true",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
                 "track_total_hits": true
               },
-              "watch": "value 与 relation 怎么变",
-              "expect": "value 变成真实总数、relation 变成 eq。精确计数要遍历更多文档，这是它唯一的代价。"
+              "watch": "value 与 relation 是否都变了",
+              "expect": "20000 / eq。同一个查询，只多一个参数，数字从「下限」变成「精确值」。"
             },
             {
-              "task": "同一查询改成 size: 2，看 max_score",
+              "task": "显式排序后 max_score 是什么",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 2,
-                "track_total_hits": true,
-                "query": {
-                  "match": {
-                    "title": "蓝牙耳机"
+                "track_total_hits": false,
+                "sort": [
+                  {
+                    "price": "asc"
+                  },
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "title",
+                  "price"
+                ]
+              },
+              "watch": "max_score 与 hits[].sort",
+              "expect": "max_score 为 null —— 带 sort 的请求不打相关性分，这不是异常；hits[].sort 里能看到排序值。"
+            },
+            {
+              "task": "一个请求同时排序与聚合",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 2,
+                "sort": [
+                  {
+                    "price": "asc"
+                  }
+                ],
+                "_source": [
+                  "title",
+                  "price"
+                ],
+                "aggs": {
+                  "cat": {
+                    "terms": {
+                      "field": "category",
+                      "size": 3
+                    }
                   }
                 }
               },
-              "watch": "max_score 从 null 变成了什么；hits.hits[0] 里有哪些键",
-              "expect": "有文档返回时 max_score 才有值，每条 hit 带 _index / _id / _score / _source。这里的分数来自 match 的相关性打分；换成 match_all 会恒为 1.0（因为它不区分相关性）。"
+              "watch": "hits 与 aggregations 是否同时返回",
+              "expect": "两者都在：sort 改顺序、aggs 加统计，互不冲突。"
             }
           ],
-          "takeaway": "先认识骨架，再学语法：query 管查什么，其余键管怎么给",
+          "takeaway": "响应字段各有主人：total 由 track_total_hits 管，max_score 由「有没有文档 / 有没有排序」管，作用域一次看清",
           "next": "m4-2",
           "prereq": {
             "cluster": true,
@@ -2617,10 +2638,10 @@
         {
           "id": "m4-2",
           "title": "从空请求体到 bool：一次只加一个变量",
-          "objective": "用六步递进，把「一条查询是怎么长出来的」亲手走一遍",
+          "objective": "用七步递进走一遍「查询怎么长出来」，同时把 total 口径与命中集变化固定下来",
           "hook": "查询不是一次写出来的，是一层层加上去的。",
           "predict": "从 {} 到完整的 bool，一共需要动几个地方？",
-          "brief": "六步：`{}` → 加 size → 换成 term → 换成 match → 换成 range → 包进 bool。每一步只在前一步的基础上加一个东西，命中数的变化就能一一对应「这一步改了什么」。这也是以后调试查询的方法：先能跑通，再加条件，最后组合。",
+          "brief": "七步：`{}` → 加 `track_total_hits:true` → 加 `size:0` → 换成 term → 换成 match → 换成 range → 包进 bool。每一步只在前一步基础上加一个东西。两个细节让结论可核对：① ①② 专门对比「不写 track_total_hits」（total 截在 10000、relation=gte）与「写上」（20000、eq）—— 否则同一张表的命中列混了两种口径，不可比；② ③ 之后统一用 `sku` 升序排序并取前 3 条 `_id`，这样「换了查法命中集就换了」看得见，而不是只看到一个数字。",
           "deep": [
             {
               "type": "p",
@@ -2699,17 +2720,10 @@
           "pitfall": "直接抄一个复杂的 bool，却说不清每一层在做什么 —— 出问题时只能靠猜。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "六步递进各跑一次，输出每步的请求体与命中数，标注「这一步只加了什么」",
-              "kind": "level"
+              "desc": "七步递进：空请求 / 精确 total / size:0 / term / match / range / bool，每步记 total、relation 与前 3 条 _id"
             },
             {
-              "label": "在控制台从零写一条",
-              "desc": "清空输入框，只写 {} 跑一次，再逐步加 size 和 query",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {}
+              "desc": "对比 ① 与 ①b 的 total，确认默认截断；对比 ④ 与 ⑥ 的前 3 条 _id，确认 bool 是条件的交集"
             }
           ],
           "probes": [
@@ -2718,77 +2732,82 @@
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {},
-              "watch": "返回了几条？total 是多少",
-              "expect": "空 body 合法，等价于 match_all，返回默认 10 条；total 只给到 10000 的下限（m4-1 讲过原因）。"
+              "watch": "total 的 value 与 relation",
+              "expect": "10000 / gte —— 空请求体等价于 match_all，但总数被截断。"
             },
             {
-              "task": "第二步：加上 size: 0",
+              "task": "只加 track_total_hits: true",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0
+                "track_total_hits": true
               },
-              "watch": "hits.hits 是不是空了，total 还在不在",
-              "expect": "文档不返回了，但 total 还在 —— 这就是「只要统计」的形态，聚合与计数都从这里开始。"
+              "watch": "total 是否变精确",
+              "expect": "20000 / eq。只多一个参数。"
             },
             {
-              "task": "第三步：加上第一个条件 term",
+              "task": "第三步：加上第一个条件 term(category)",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 3,
                 "track_total_hits": true,
+                "sort": [
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku"
+                ],
                 "query": {
                   "term": {
                     "category": "数码影音"
                   }
                 }
               },
-              "watch": "命中多少；term 后面为什么不加 .keyword",
-              "expect": "category 在 v2 里本身就是 keyword，所以直接查字段名。命中数是该品类的商品总数。"
+              "watch": "命中数与前 3 条 _id",
+              "expect": "约 7,130 条。记下这 3 条 _id，下一步换成 match 后它们会全部变掉。"
             },
             {
-              "task": "第四步：换成 match",
+              "task": "第四步：只把 term 换成 match(title)",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 3,
                 "track_total_hits": true,
+                "sort": [
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku"
+                ],
                 "query": {
                   "match": {
                     "title": "蓝牙耳机"
                   }
                 }
               },
-              "watch": "命中数比 term 多还是少，为什么",
-              "expect": "match 会先分词再匹配，所以「蓝牙」「耳机」分别命中，范围比 term 整串匹配大得多。"
+              "watch": "命中数与 _id 与上一步的差别",
+              "expect": "约 3,788 条，前 3 条 _id 与 term 的结果完全不同 —— 换的是查法，不是数据。"
             },
             {
-              "task": "第五步：换成 range",
+              "task": "第六步：包成 bool(must + filter)",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 3,
                 "track_total_hits": true,
-                "query": {
-                  "range": {
-                    "price": {
-                      "gte": 100,
-                      "lte": 200
-                    }
+                "sort": [
+                  {
+                    "sku": "asc"
                   }
-                }
-              },
-              "watch": "区间两端是包含还是排除（gte/lte 的 e 是什么）",
-              "expect": "gte/lte 的 e 是 equal，两端都包含；要排除改用 gt/lt。"
-            },
-            {
-              "task": "第六步：组合成 bool",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 0,
-                "track_total_hits": true,
+                ],
+                "_source": [
+                  "sku"
+                ],
                 "query": {
                   "bool": {
                     "must": [
@@ -2811,11 +2830,11 @@
                   }
                 }
               },
-              "watch": "命中数是不是同时小于第四步和第五步的结果",
-              "expect": "两个条件是与关系，命中数必然更小。为什么文本放 must、价格放 filter，下一关讲。"
+              "watch": "命中数是否 ≤ 上两步的较小值",
+              "expect": "约 2,305 条，必然 ≤ min(match, range) —— bool 是交集，不是相加。"
             }
           ],
-          "takeaway": "写查询的顺序是「先能跑，再加条件，最后组合」，不是一次写出一个复杂的 bool",
+          "takeaway": "写查询的顺序是「先能跑，再加条件，最后组合」；每一步只改一处，命中数与 _id 才对得上",
           "next": "m4-3",
           "prereq": {
             "cluster": true,
@@ -2831,10 +2850,10 @@
         {
           "id": "m4-3",
           "title": "match / term / range 的适用边界",
-          "objective": "match / term / range 各自的适用边界与典型误用",
+          "objective": "分清「静默 0 条」与「真的报错」，并知道三类静默失败的排查方法",
           "hook": "用错字段类型不会报错，只会静默返回 0 条。",
           "predict": "term 查一个数值字段，会命中吗？",
-          "brief": "match 会分析查询串（用于 text 全文检索，算相关性）；term 不分析（用于 keyword/数值/布尔的精确匹配）；range 用于数值与日期区间。最常见的三个坑：term 打在 text 上返回 0 条、match 打在 keyword 上不分词、数值字段用 term 做「精确等于」受浮点精度影响。",
+          "brief": "同一份数据上跑 11 种查询，分成两组：静默组（term 打 text、term 打不存在的字段、term 打 object、exists 查不存在的字段）都不报错、只返回 0 条；报错组（把字符串传给数值字段）直接 400。两组都重要 —— 只有知道哪一类会报错，才分得清「查不到」和「写错了」。本关还给出「整串相等」的对照：用一条真实标题去查 `title.keyword`，命中是 2 条而不是几千条。",
           "deep": [
             {
               "type": "p",
@@ -2906,44 +2925,28 @@
           "pitfall": "数值字段用 term 做等于：float/scaled_float 上极易因精度差 0 条，且不报错；改用 range gte=x lte=x。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "同一份数据上跑 6 种查询，逐个标注命中数与陷阱",
-              "kind": "level"
+              "desc": "11 种查询：match/term/range 正常用法 + 三类静默 0 + 一类 400，逐个标注字段类型与后果"
             },
             {
-              "label": "试试数值等于的坑",
-              "desc": "把 term 换成 range gte/lte，对比命中",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 0,
-                "query": {
-                  "range": {
-                    "price": {
-                      "gte": 299,
-                      "lte": 299
-                    }
-                  }
-                }
-              }
+              "desc": "用一条真实标题查 title.keyword（整串相等），与 match 的几千条对照"
             }
           ],
           "probes": [
             {
-              "task": "对 text 字段用 term 查一个词",
+              "task": "对 text 字段用 term",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "query": {
                   "term": {
                     "title": "蓝牙耳机"
                   }
                 }
               },
-              "watch": "命中数是不是 0",
-              "expect": "0 条、不报错。term 的语义是「不分析」，它拿整串去词项词典里找；而 text 里存的是分词结果，整串不存在。这是最典型的静默失败。"
+              "watch": "返回 0 还是报错",
+              "expect": "0 条且不报错。term 不分析查询串，词典里没有「蓝牙耳机」这个整词。"
             },
             {
               "task": "同一个词改用 match",
@@ -2958,30 +2961,41 @@
                   }
                 }
               },
-              "watch": "命中数规模与 took",
-              "expect": "命中数万条。match 先分析再查，是全文检索的正确入口；term 只适合 keyword / 数值 / 布尔的精确匹配。"
+              "watch": "与上一条的差距",
+              "expect": "约 3,788 条。match 先把查询串切成词，再按词项匹配。"
             },
             {
-              "task": "对 status（integer）用 range 做「等于 2」",
+              "task": "term 查一个不存在的字段",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
-                "track_total_hits": true,
                 "query": {
-                  "range": {
-                    "status": {
-                      "gte": 2,
-                      "lte": 2
-                    }
+                  "term": {
+                    "no_such_field": "x"
                   }
                 }
               },
-              "watch": "命中数；再和 term status=2 的结果对比",
-              "expect": "命中数与 term status=2 完全相同（本项目实测 30,040 条）。语义等价，但 range 写法能让 ES 用上 IndexOrDocValuesQuery（BKD + doc_values 双路择优），在部分场景比纯点查询更稳。"
+              "watch": "报错还是静默",
+              "expect": "0 条，不报错。字段名拼错是最难查的一类「搜不到」。"
+            },
+            {
+              "task": "把字符串传给数值字段",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "query": {
+                  "term": {
+                    "price": "abc"
+                  }
+                }
+              },
+              "watch": "返回 400 还是 0 条",
+              "expect": "400：failed to create query: For input string: \"abc\"。类型真的对不上才会报错。"
             }
           ],
-          "takeaway": "先看字段类型再选查询类型：反了就是静默 0 条，而不是报错",
+          "takeaway": "先看字段类型再选查询类型；0 条有三种成因（分词不匹配 / 字段不存在 / 打错层级），只有类型错误会 400",
           "next": "m4-4",
           "prereq": {
             "cluster": true,
@@ -2997,10 +3011,10 @@
         {
           "id": "m4-4",
           "title": "bool 的四个子句在做什么",
-          "objective": "must / filter / should / must_not 各自的语义与算分行为",
+          "objective": "用同一个条件换四个位置，看清 must / filter / should / must_not 的语义差别",
           "hook": "同一个条件放 must 还是 filter，命中数一样，分数和开销完全不一样。",
           "predict": "把条件从 must 挪到 filter，命中数会变吗？",
-          "brief": "must 参与算分；filter 只过滤不算分且可缓存；should 在存在 must/filter 时退化为加分项；must_not 排除且不算分。本关把类目、价格、状态三个「是/否」条件放进 filter，把文本相关性放进 must，再对比「把价格挪进 must」后分数分布的变化。",
+          "brief": "同一个价格区间，依次放进 filter / must / should / must_not，其余条件一字不改：命中数 568 / 568 / 741 / 173，最高分 5.410 / 6.410 / 6.410 / 5.205。位置变了，命中集与分数就跟着变 —— 这就是「位置决定语义」的全部证据。第二组单独验证 should 的两副面孔：只有 should 时默认 MSM=1（8,839 条），写成 `minimum_should_match:2` 就变成 1,246 条。",
           "deep": [
             {
               "type": "p",
@@ -3078,18 +3092,20 @@
           "pitfall": "把 range/term 放进 must 会让「价格区间」变成相关性因子，分数分布被扭曲，排序结果随之改变——这类 bug 表现为「排序不符合预期」，很难联想到 must。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "完整 bool（must+filter+should+must_not）与「价格挪进 must」对照，对比分数",
-              "kind": "level"
+              "desc": "同一价格条件放进 filter / must / should / must_not，记录命中与 max_score"
+            },
+            {
+              "desc": "只留两个 should 条件，对比默认 MSM 与 minimum_should_match:2 的命中数"
             }
           ],
           "probes": [
             {
-              "task": "一个完整的 bool：文本相关性放 must，价格放 filter",
+              "task": "价格在 filter（基准）",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 1,
+                "size": 3,
+                "track_total_hits": true,
                 "query": {
                   "bool": {
                     "must": [
@@ -3101,45 +3117,37 @@
                     ],
                     "filter": [
                       {
+                        "term": {
+                          "category": "数码影音"
+                        }
+                      },
+                      {
                         "range": {
                           "price": {
                             "gte": 100,
-                            "lte": 500
+                            "lte": 800
                           }
+                        }
+                      },
+                      {
+                        "term": {
+                          "status": 1
                         }
                       }
                     ]
                   }
                 }
               },
-              "watch": "max_score 是多少",
-              "expect": "max_score 约 5.34。分数只来自 must 里的文本相关性，filter 不参与算分 —— 这正是「过滤条件不该影响排序」的正确表达方式。"
+              "watch": "命中数与 max_score",
+              "expect": "约 568 条，max_score 只看文本相关性（约 5.410）。"
             },
             {
-              "task": "把同一个查询换成 constant_score",
+              "task": "同一条件挪进 must",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 1,
-                "query": {
-                  "constant_score": {
-                    "filter": {
-                      "term": {
-                        "status": 1
-                      }
-                    }
-                  }
-                }
-              },
-              "watch": "max_score 是不是固定值",
-              "expect": "max_score=1.0。当只关心「是否命中」、不关心分数时，constant_score 跳过评分器分配，比 must 更彻底地省钱。"
-            },
-            {
-              "task": "把价格条件从 filter 挪进 must，再跑一次",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 1,
+                "size": 3,
+                "track_total_hits": true,
                 "query": {
                   "bool": {
                     "must": [
@@ -3152,7 +3160,48 @@
                         "range": {
                           "price": {
                             "gte": 100,
-                            "lte": 500
+                            "lte": 800
+                          }
+                        }
+                      }
+                    ],
+                    "filter": [
+                      {
+                        "term": {
+                          "category": "数码影音"
+                        }
+                      },
+                      {
+                        "term": {
+                          "status": 1
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "watch": "命中数是否变、max_score 是否变高",
+              "expect": "命中仍约 568，max_score 升到约 6.410 —— 价格区间也成了加分项。"
+            },
+            {
+              "task": "只有 should 时默认要中几个",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "term": {
+                          "tags": "爆款"
+                        }
+                      },
+                      {
+                        "range": {
+                          "rating": {
+                            "gte": 4.5
                           }
                         }
                       }
@@ -3160,11 +3209,41 @@
                   }
                 }
               },
-              "watch": "命中数是否不变，max_score 是否变大",
-              "expect": "命中数一样，max_score 从 5.34 变成约 6.34 —— range 也参与算分了。分数分布被价格区间扭曲，排序结果随之改变。这类 bug 表现为「排序不符合预期」，很难联想到 must。"
+              "watch": "命中数量级",
+              "expect": "约 8,839 条：没有 must/filter 时默认 minimum_should_match = 1。"
+            },
+            {
+              "task": "同一个 bool 加 minimum_should_match: 2",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "bool": {
+                    "should": [
+                      {
+                        "term": {
+                          "tags": "爆款"
+                        }
+                      },
+                      {
+                        "range": {
+                          "rating": {
+                            "gte": 4.5
+                          }
+                        }
+                      }
+                    ],
+                    "minimum_should_match": 2
+                  }
+                }
+              },
+              "watch": "命中数怎么变",
+              "expect": "约 1,246 条 —— should 从「加分项」变成「必要条件」。"
             }
           ],
-          "takeaway": "must 参与算分、filter 不算分且可缓存——命中数相同，代价不同",
+          "takeaway": "位置决定语义：filter 不过滤分数、must 计分、should 可选中、must_not 反向；MSM 是把 should 变必需的开关",
           "next": "m4-5",
           "prereq": {
             "cluster": true,
@@ -3180,10 +3259,10 @@
         {
           "id": "m4-5",
           "title": "子句参数：改命中集，还是改排序",
-          "objective": "分清「改谁算命中」与「改谁排前面」两类参数",
+          "objective": "把 operator / minimum_should_match / boost 分成「改召回」与「改排序」两组并给出证据",
           "hook": "同样是 match，加一个参数能让命中数掉几十倍，也可能一条都不动。",
           "predict": "operator: and 和 boost: 5，哪个会让命中数变少？",
-          "brief": "同一个查询类型，参数分两类。改「谁算命中」的：operator（or / and）、minimum_should_match —— 它们直接改变命中集。改「谁排前面」的：boost —— 它只放大某些条件的分数权重，命中数一行都不会变。分清这两类，才知道一个参数该不该用、用了会动到什么。本关用「蓝牙 降噪 耳机」三词查询做出召回梯度，再用 boost 演示「命中不变、分数变」。",
+          "brief": "同一句「蓝牙 降噪 耳机」：operator=or 命中 6,112、MSM:2 命中 2,060、operator=and 命中 212 —— 三个数一条梯度，改的是「谁算命中」。boost 那一组命中数纹丝不动（10,105 → 10,105），最高分从 2.844 抬到 10.131。本关把每组的 Top3 都列出来：如果 boost 前后 Top3 顺序变了，说明它作用在打分阶段；本机头部文档本来就在最前，所以只看到分数变、顺序没变 —— 这也是结论，不硬写「换了人」。",
           "deep": [
             {
               "type": "p",
@@ -3252,37 +3331,19 @@
           "pitfall": "把 boost 当过滤条件用：以为提高权重就能「优先返回必须有这个标签的」，实际命中集里仍然包含没有这个标签的文档。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "operator / minimum_should_match / boost 三组对照，输出命中数与最高分",
-              "kind": "level"
+              "desc": "operator / MSM / boost 五组对照，每组给命中数、最高分、Top3 标题"
             },
             {
-              "label": "自己调一次 msm",
-              "desc": "把 minimum_should_match 改成 3 或 75%，观察命中数怎么收",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 0,
-                "track_total_hits": true,
-                "query": {
-                  "match": {
-                    "title": {
-                      "query": "蓝牙 降噪 耳机",
-                      "minimum_should_match": "2"
-                    }
-                  }
-                }
-              }
+              "desc": "判断 boost 前后 Top3 是否换序（没换就标注「本机未测出」，不宣称排序变了）"
             }
           ],
           "probes": [
             {
-              "task": "默认 operator: or",
+              "task": "默认 operator: or 的召回",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 3,
                 "track_total_hits": true,
                 "query": {
                   "match": {
@@ -3290,34 +3351,15 @@
                   }
                 }
               },
-              "watch": "三个词中命中任意一个就算命中，召回有多大",
-              "expect": "默认是 or，召回最大。中文短句经常因此返回一堆不太相关的商品。"
-            },
-            {
-              "task": "收紧到 minimum_should_match: 2",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 0,
-                "track_total_hits": true,
-                "query": {
-                  "match": {
-                    "title": {
-                      "query": "蓝牙 降噪 耳机",
-                      "minimum_should_match": "2"
-                    }
-                  }
-                }
-              },
-              "watch": "命中数比上一条少了多少",
-              "expect": "要求三个词里至少中两个，命中数明显下降，但结果相关性提高。"
+              "watch": "命中数",
+              "expect": "约 6,112 条：任一词命中即算命中，召回最大。"
             },
             {
               "task": "收紧到 operator: and",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 3,
                 "track_total_hits": true,
                 "query": {
                   "match": {
@@ -3328,15 +3370,15 @@
                   }
                 }
               },
-              "watch": "再少多少；这种写法什么时候会「搜不到」",
-              "expect": "三个词必须全中，是三者中最严格的。用户输入越长，and 越容易返回 0 条。"
+              "watch": "命中数掉了多少",
+              "expect": "约 212 条，三个词必须全中。"
             },
             {
-              "task": "boost 前后对比最高分",
+              "task": "boost 前后：命中数会不会变",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 1,
+                "size": 3,
                 "track_total_hits": true,
                 "query": {
                   "bool": {
@@ -3358,11 +3400,11 @@
                   }
                 }
               },
-              "watch": "命中数有没有变，max_score 有没有变",
-              "expect": "命中数与不加 boost 时完全相同，只有分数被抬高 —— boost 是排序工具，不是过滤器。"
+              "watch": "命中数与 max_score",
+              "expect": "命中仍是约 10,105，最高分从约 2.844 抬到约 10.131 —— boost 只改打分。"
             }
           ],
-          "takeaway": "operator 与 minimum_should_match 决定谁算命中，boost 只决定谁排前面",
+          "takeaway": "operator 与 MSM 决定谁算命中，boost 只决定谁排前面；分数变了不等于顺序变了，要看 Top3",
           "next": "m4-6",
           "prereq": {
             "cluster": true,
@@ -3378,10 +3420,10 @@
         {
           "id": "m4-6",
           "title": "filter vs must：算分是要花钱的",
-          "objective": "用实测数据说明「算分」到底花多少钱",
+          "objective": "实测 must 与 filter 的耗时与缓存行为，分清「不打分」与「能缓存」两件事",
           "hook": "同一谓词、同一命中数，只改子句位置，耗时和缓存行为都变了。",
           "predict": "同一组条件，filter 会比 must 快多少？",
-          "brief": "本关用 5 轮采样取中位数对比 must 与 filter 两种写法，并读取 request cache 的命中增量。结论往往「没那么戏剧性」：2 万文档规模下差距可能落在噪声里——这本身是重要一课：不要用单次 took 证明优化有效。",
+          "brief": "两组谓词完全相同，只改子句位置，各 5 轮交替采样（另有 1 轮预热）。本机 2 万条 / 3 分片下两者中位都是 0–1ms，差值落在噪声里 —— 这本身是结论：**这个规模测不出算分成本**。缓存部分给出与常见说法相反的结果：清缓存后同一请求连发两次，must 组和 filter 组的 request cache 都是「第一次 miss、第二次 hit」（两组 hit 增量都是 +3）—— 所以「filter 才能被缓存」是错的；唯一稳定可复现的差别是 `_score`：filter 恒为 0，must 有分。",
           "deep": [
             {
               "type": "p",
@@ -3428,31 +3470,27 @@
           "pitfall": "拿一次 took 的差异下结论。单机单分片、数据在页缓存中时，几十毫秒的差异可能完全来自 JIT 与 GC，必须多轮取中位数。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "must 与 filter 各采 5 轮，输出中位数、样本值、request cache 命中增量",
-              "kind": "level"
+              "desc": "must / filter 各 5 轮交替采样 + 1 轮预热，输出中位与样本；另测清缓存后连发两次的 hit/miss 增量"
+            },
+            {
+              "desc": "对比两条路径的 _score，确认「不打分」是唯一确定的差别"
             }
           ],
           "probes": [
             {
-              "task": "must 版本的查询（价格条件参与算分）",
+              "task": "must 版本（价格条件参与算分）",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 1,
                 "query": {
                   "bool": {
                     "must": [
                       {
-                        "match": {
-                          "title": "蓝牙耳机"
-                        }
-                      },
-                      {
                         "range": {
                           "price": {
                             "gte": 100,
-                            "lte": 500
+                            "lte": 800
                           }
                         }
                       }
@@ -3460,30 +3498,23 @@
                   }
                 }
               },
-              "watch": "ES took 与客户端往返耗时",
-              "expect": "单次 took 常常是 1–20ms 的抖动区间。不要拿这一次的数字下结论 —— 关卡主流程做了 5 轮采样取中位数，那才是证据。"
+              "watch": "返回文档的 _score",
+              "expect": "> 0：must 里的条件参与打分。"
             },
             {
-              "task": "filter 版本：条件完全相同，只改子句位置",
+              "task": "filter 版本：条件相同、位置不同",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 1,
                 "query": {
                   "bool": {
-                    "must": [
-                      {
-                        "match": {
-                          "title": "蓝牙耳机"
-                        }
-                      }
-                    ],
                     "filter": [
                       {
                         "range": {
                           "price": {
                             "gte": 100,
-                            "lte": 500
+                            "lte": 800
                           }
                         }
                       }
@@ -3491,18 +3522,41 @@
                   }
                 }
               },
-              "watch": "命中数是否与上一条完全一致；took 差多少",
-              "expect": "命中数完全相同，took 可能只差几毫秒甚至反向。20 万文档的本机上，filter 的收益常常落在噪声里 —— 这本身就是重要结论：优化要结合数据规模，不能照搬「filter 一定更快」。"
+              "watch": "_score 是否为 0",
+              "expect": "0。filter 不分配评分器，这是它唯一确定的优势。"
             },
             {
-              "task": "读 request cache 的命中与未命中计数",
-              "method": "GET",
-              "path": "/eslab-products-v2/_stats/request_cache",
-              "watch": "hit_count 与 miss_count 的变化趋势",
-              "expect": "hit_count 常为 0。request cache 只对 size=0 或聚合请求生效，且要求查询体完全一致；带 now-1d 这类每次变化的表达式会让它永远不命中 —— 线上「缓存命中率恒为 0」的经典原因。"
+              "task": "filter 版 size:0 查询（连发两次看缓存）",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "bool": {
+                    "filter": [
+                      {
+                        "range": {
+                          "price": {
+                            "gte": 100,
+                            "lte": 800
+                          }
+                        }
+                      },
+                      {
+                        "term": {
+                          "status": 1
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              "watch": "命中数与 took；再点一次，看 took 是否变小",
+              "expect": "命中约 8,222 条（价格区间 ∩ status:1）、took 1ms 级。同一条查询连发两次时，第二次会命中 request cache —— 这跟 must 组一样，不是 filter 独占。"
             }
           ],
-          "takeaway": "过滤条件一律进 filter，算分只留给真正需要按相关性排序的查询",
+          "takeaway": "本规模下 must 与 filter 耗时测不出差别；确定的分界是「打不打分」，不是「缓不缓存」",
           "next": "m4-7",
           "prereq": {
             "cluster": true,
@@ -3774,10 +3828,10 @@
         {
           "id": "m5-1",
           "title": "terms 聚合的计数为什么是近似的",
-          "objective": "terms 聚合的计数为什么会偏，以及 shard_size 在控制什么",
+          "objective": "说清 terms 聚合的误差上界是什么，并用两条等式自查聚合结果",
           "hook": "doc_count_error_upper_bound 不为 0 时，你的报表数字就是「大约」。",
           "predict": "12 个类目的 terms 聚合，各桶计数加起来等于总文档数吗？",
-          "brief": "terms 聚合是分布式近似：每个分片各自取 top N 上报，协调节点合并。分片越多、size 越小，被截断的候选越多，误差项 doc_count_error_upper_bound 越大。本关对比类目（12 个值）与品牌（size=5，默认 shard_size 与 shard_size=100）的误差表现。",
+          "brief": "类目（低基数）误差上界 0；品牌（高基数、size=5）默认 shard_size 下上界 337，把 shard_size 调到 100 后降到 0 —— 但两次返回的桶与计数完全一样（4,257 / 2,250 / 1,644 / 1,249 / 982）。所以上界是「最坏情况」，不是「一定算错」。两条自查等式写进表格：桶 doc_count 之和 + sum_other_doc_count = 精确 total；任一桶的 doc_count = 同条件 filter 查询的计数。",
           "deep": [
             {
               "type": "p",
@@ -3849,20 +3903,22 @@
           "pitfall": "把 terms 聚合结果直接当精确值写进财务报表：只要误差上界不为 0，就应该在报表里标注「近似」。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "对比类目聚合与品牌聚合（含 shard_size 调整）的桶数、other 文档数、误差上界",
-              "kind": "level"
+              "desc": "类目 / 品牌（默认 shard_size）/ 品牌（shard_size=100）三组聚合，对比桶数、other、误差上界"
+            },
+            {
+              "desc": "用桶的 key 回查 _count，核对 doc_count；校验「桶和 + other = total」"
             }
           ],
           "probes": [
             {
-              "task": "按类目做 terms 聚合，只取前 5 个桶",
+              "task": "类目聚合（低基数）",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "aggs": {
-                  "by_category": {
+                  "c": {
                     "terms": {
                       "field": "category",
                       "size": 5
@@ -3871,16 +3927,36 @@
                 }
               },
               "watch": "doc_count_error_upper_bound 与 sum_other_doc_count",
-              "expect": "误差上界通常为 0（类目只有 12 个值，3 个分片各取 5 个桶足够覆盖），但 sum_other_doc_count 会很大 —— 说明前 5 个桶之外还有大量文档没进榜。这两个数一起看，才知道 size 够不够。"
+              "expect": "上界 0（每个分片都能报全 12 个类目），other 约 4,704。"
             },
             {
-              "task": "按品牌聚合（30 个值），把 shard_size 调到 100",
+              "task": "品牌聚合：默认 shard_size",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "aggs": {
-                  "by_brand": {
+                  "b": {
+                    "terms": {
+                      "field": "brand",
+                      "size": 5
+                    }
+                  }
+                }
+              },
+              "watch": "误差上界是多少",
+              "expect": "约 337：高基数字段上，各分片只上报 top(size*1.5+10) 个候选，长尾会被截断。"
+            },
+            {
+              "task": "同一个聚合把 shard_size 调到 100",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "aggs": {
+                  "b": {
                     "terms": {
                       "field": "brand",
                       "size": 5,
@@ -3889,29 +3965,27 @@
                   }
                 }
               },
-              "watch": "误差上界是否变成 0",
-              "expect": "shard_size=100 让每个分片多上报候选，合并后误差上界通常为 0。代价是分片要维护更大的优先队列、协调节点合并更多桶 —— 内存换精度。"
+              "watch": "上界变小了，桶变了吗",
+              "expect": "上界降到 0，但前 5 个桶与计数完全不变 —— 说明这次本来就没截断误差。"
             },
             {
-              "task": "对 text 字段 title 做 terms 聚合",
+              "task": "用桶的 key 回查精确计数",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
-                "aggs": {
-                  "bad": {
-                    "terms": {
-                      "field": "title",
-                      "size": 5
-                    }
+                "track_total_hits": true,
+                "query": {
+                  "term": {
+                    "category": "数码影音"
                   }
                 }
               },
-              "watch": "是否报错，错误类型是什么",
-              "expect": "400 search_phase_execution_exception，root cause 是 Fielddata is disabled on [title]。text 没有 doc_values，要聚合必须开 fielddata（把词项加载进 JVM 堆，几十万文档就能吃掉数 GB）—— 正确做法是聚合 title.keyword。"
+              "watch": "命中数与桶里的 doc_count 是否相等",
+              "expect": "7,130 = 7,130。桶计数可以被一条独立查询验证。"
             }
           ],
-          "takeaway": "分布式 terms 是「各分片取 TopN 再合并」，误差来自被截断的长尾",
+          "takeaway": "上界是保守估计，不是实际误差；用「桶和+other=total」和「桶=filter 计数」两条等式自查",
           "next": "m5-2",
           "prereq": {
             "cluster": true,
@@ -3927,10 +4001,10 @@
         {
           "id": "m5-2",
           "title": "排序为什么总让你加 .keyword",
-          "objective": "为什么按 text 字段排序会被拒绝，.keyword 子字段解决了什么",
+          "objective": "用同一张表证明：排序与聚合卡在同一道门 —— doc_values",
           "hook": "Fielddata is disabled on text fields by default —— 这个报错解释了 doc_values 的存在。",
           "predict": "sort title 会成功还是 400？",
-          "brief": "排序要按文档取字段值，依赖列式存储 doc_values。text 字段只建倒排索引（词项→文档），没有 doc_values，所以不能排序/聚合。本关对比 sort price、sort title（报错）、sort title.keyword（成功），并给出字段能力矩阵。",
+          "brief": "五个字段各做一次 sort 与一次 terms 聚合：title / description（text）两种操作都被 400 拒绝，price / category / title.keyword 都成功。第 4 列是聚合结果、第 3 列是排序结果，并排看才知道「不是排序的问题」。400 的原文（Fielddata is disabled）也截进 notes —— 只说「不能排序」而不给报错，下次遇到同样的 400 还是不认识。",
           "deep": [
             {
               "type": "p",
@@ -3968,20 +4042,71 @@
           "pitfall": "为了排序去开 fielddata：几十万文档就能吃掉数 GB 堆，且无法主动释放，最终 OOM。正确做法是加 keyword 子字段。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "三种排序目标对比，并从 mapping 读出每个字段是否具备 doc_values",
-              "kind": "level"
+              "desc": "五个字段 × 两种操作（sort / terms 聚合），记录成功结果或 400 原文"
+            },
+            {
+              "desc": "从 mapping 读回类型，确认失败的两个字段都是 text，且 title 有 keyword 子字段"
             }
           ],
           "probes": [
             {
-              "task": "按 price 排序",
+              "task": "按 text 字段排序",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 1,
+                "sort": [
+                  {
+                    "title": "asc"
+                  }
+                ]
+              },
+              "watch": "400 的 root_cause 说什么",
+              "expect": "Fielddata is disabled on [title]：text 没有 doc_values，不能排序。"
+            },
+            {
+              "task": "按 text 字段做 terms 聚合",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "t": {
+                    "terms": {
+                      "field": "title"
+                    }
+                  }
+                }
+              },
+              "watch": "是否同样被拒",
+              "expect": "同样 400，同一个 root_cause —— 排序和聚合都要 doc_values。"
+            },
+            {
+              "task": "换 title.keyword 做聚合",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "t": {
+                    "terms": {
+                      "field": "title.keyword",
+                      "size": 3
+                    }
+                  }
+                }
+              },
+              "watch": "buckets 的 key 与 doc_count",
+              "expect": "正常返回 top3 桶，key 是完整标题。"
+            },
+            {
+              "task": "按数值字段排序（对照）",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 2,
                 "_source": [
-                  "sku",
+                  "title",
                   "price"
                 ],
                 "sort": [
@@ -3990,45 +4115,11 @@
                   }
                 ]
               },
-              "watch": "是否成功，返回的 price 是否递增",
-              "expect": "成功。price 是 scaled_float，有 doc_values，排序是读列式存储的顺序扫描，不需要额外结构。"
-            },
-            {
-              "task": "按 title（text）排序",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 2,
-                "sort": [
-                  {
-                    "title": "asc"
-                  }
-                ]
-              },
-              "watch": "报错信息里的关键句",
-              "expect": "400，Fielddata is disabled on [title]。text 为支持分词只建倒排索引（词项→文档），没有 doc_values（文档→值），排序要按文档取值，所以不行。"
-            },
-            {
-              "task": "按 title.keyword 排序",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 2,
-                "_source": [
-                  "sku",
-                  "title"
-                ],
-                "sort": [
-                  {
-                    "title.keyword": "asc"
-                  }
-                ]
-              },
-              "watch": "是否成功，以及排序结果是否符合字典序",
-              "expect": "成功，按整串字典序排列。这就是双写模式的价值：同一份标题，text 用来搜、keyword 用来排。注意 ignore_above=256，超长标题不会进入 title.keyword，排序时会表现为缺失。"
+              "watch": "是否成功",
+              "expect": "成功：数值字段默认有 doc_values。"
             }
           ],
-          "takeaway": "排序和聚合要 doc_values，text 默认不建，keyword 才有",
+          "takeaway": "排序和聚合是同一道门：doc_values；text 没有，所以要么用 .keyword，要么换字段",
           "next": "m5-3",
           "prereq": {
             "cluster": true,
@@ -4044,10 +4135,10 @@
         {
           "id": "m5-3",
           "title": "嵌套聚合：类目 → 品牌 → 价格分布",
-          "objective": "三层嵌套聚合怎么写，以及桶数爆炸的代价",
+          "objective": "写三层嵌套聚合，并用独立查询核对每个桶，同时说清空桶与分位数的含义",
           "hook": "聚合是一棵树，子聚合的输入是父桶内的文档子集。",
           "predict": "三层嵌套聚合的桶数是相加还是相乘？",
-          "brief": "一次请求同时算出：4 个类目各自 Top2 品牌的均价与最高价、各类目的价格 P50/P95、以及近 24 个月的月均价走势。子聚合挂在父桶上，处理的是「父桶命中的那部分文档」。",
+          "brief": "一次请求算出 4 个类目 × Top2 品牌的均价/最高价、各类目的 P50/P95，以及 26 个月的价格走势。本关给三样可核对的东西：① 每个「类目×品牌」桶的 doc_count 都用同条件 filter 查询回查（第 7 列），8 个桶全部一致；② 时间直方图用 `min_doc_count:0` + `extended_bounds`，末尾出现 2 个 0 文档的空桶 —— 补时间序列要用它；③ P50 与 avg 并列，说明长尾会把均值拉高。",
           "deep": [
             {
               "type": "p",
@@ -4114,26 +4205,32 @@
           "pitfall": "把 percentiles 的 P95 当精确分位数：TDigest 是近似算法，边界值附近误差明显，报表标注应为「约」。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "类目→品牌→价格统计 + 按月均价，输出扁平表格与近 12 月均价曲线",
-              "kind": "level"
+              "desc": "类目→品牌→价格统计 + 按月均价（含空桶），输出扁平表与近 12 月曲线"
+            },
+            {
+              "desc": "对 8 个「类目×品牌」桶逐个跑 filter 计数核对；检查空桶与 P50/avg 的差异"
             }
           ],
           "probes": [
             {
-              "task": "类目 → 品牌 两层聚合，并在品牌桶里算价格统计",
+              "task": "类目→品牌 两层聚合并算价格统计",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
+                "query": {
+                  "term": {
+                    "status": 1
+                  }
+                },
                 "aggs": {
                   "by_category": {
                     "terms": {
                       "field": "category",
-                      "size": 3
+                      "size": 4
                     },
                     "aggs": {
-                      "by_brand": {
+                      "top_brands": {
                         "terms": {
                           "field": "brand",
                           "size": 2
@@ -4150,50 +4247,65 @@
                   }
                 }
               },
-              "watch": "聚合树有几层，每个子桶的 doc_count 是不是父桶的子集",
-              "expect": "三层结构：类目桶 → 品牌桶 → stats。子聚合只在父桶命中的文档子集上执行，所以成本约等于「桶数 × 子聚合成本」—— 对高基数字段做 terms(size=10000) 危险的不是文档多，是桶多。"
+              "watch": "每个父桶下的子桶与 stats",
+              "expect": "4 个类目 × 2 个品牌，stats 里 count/avg/max 都有值。"
             },
             {
-              "task": "按月聚合文档数（calendar_interval）",
+              "task": "按月聚合，保留空桶",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
                 "aggs": {
-                  "by_month": {
+                  "m": {
                     "date_histogram": {
                       "field": "created_at",
-                      "calendar_interval": "month"
+                      "calendar_interval": "month",
+                      "min_doc_count": 0,
+                      "extended_bounds": {
+                        "max": "2026-12-31"
+                      }
                     }
                   }
                 }
               },
-              "watch": "桶的 key 是不是自然月边界",
-              "expect": "每个桶是一个自然月。用 calendar_interval 而不是 fixed_interval:30d，才能正确处理月份长度与时区；固定 30 天会逐月累积偏移。"
+              "watch": "末尾是否有 doc_count=0 的桶",
+              "expect": "有 2 个（2026-11、2026-12）：数据只到 10 月，空桶靠 extended_bounds 补出来。"
             },
             {
-              "task": "算价格的 P50 与 P95",
+              "task": "核对一个桶的计数",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
-                "aggs": {
-                  "price_pct": {
-                    "percentiles": {
-                      "field": "price",
-                      "percents": [
-                        50,
-                        95
-                      ]
-                    }
+                "track_total_hits": true,
+                "query": {
+                  "bool": {
+                    "filter": [
+                      {
+                        "term": {
+                          "category": "数码影音"
+                        }
+                      },
+                      {
+                        "term": {
+                          "brand": "声阔"
+                        }
+                      },
+                      {
+                        "term": {
+                          "status": 1
+                        }
+                      }
+                    ]
                   }
                 }
               },
-              "watch": "P50 与 P95 的差距，以及这是不是精确值",
-              "expect": "P50 约 300、P95 明显更高（对数正态长尾）。percentiles 用 TDigest 近似，尾部误差更明显，报表里该标注「约」。要精确就得多跑几次或换 composite + 手动统计。"
+              "watch": "命中数与桶里的 doc_count",
+              "expect": "约 833，与聚合里的品牌桶一致 —— 聚合结果可以被独立查询验证。"
             }
           ],
-          "takeaway": "嵌套聚合的代价是桶数相乘，先想清楚要看什么再往下钻",
+          "takeaway": "嵌套聚合看的是树：父桶定范围、子桶在范围内统计；空桶与分位数要单独解释，别默认它们「有值」",
           "next": "m5-4",
           "prereq": {
             "cluster": true,

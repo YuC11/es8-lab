@@ -13,24 +13,29 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * M5-2 排序为什么总让你加 .keyword
+ * M5-2 排序与聚合为什么都要 keyword：doc_values 是那道门槛
  *
- * 排序需要"按文档取字段值"，这要求列式存储（doc_values）。
- * text 字段只有倒排索引（词项→文档），没有 doc_values，所以不能排序/聚合。
+ * 同一个字段，两种用法各试一次：
+ *   排序（sort）   → 需要按值取顺序
+ *   聚合（terms）  → 需要按值分组
+ * 两者都读 doc_values（列式存储）。text 字段为了支持分词只建倒排索引、不建 doc_values，
+ * 所以两个操作都会被 400 拒绝；换成 .keyword 子字段（或本来就是 keyword 的字段）就都成功。
+ *
+ * 本关把「拒绝」与「成功」并排放，并且把 400 的 root_cause 原文截出来 —— 只说「不能排序」
+ * 而不给报错，学生下次遇到同样的 400 还是不认识。
  */
 @Component
 public class M52SortFielddata implements LevelModule {
 
     private static final String INDEX = SeedService.V2;
 
-    private static final List<String> MATRIX_FIELDS = List.of(
-            "sku", "title", "description", "category", "price", "status", "tags", "created_at");
+    /** 代表字段：两个 text、一个数值、一个 keyword，外加 text 的 keyword 子字段 */
+    private static final List<String> SORT_FIELDS = List.of("title", "description", "price", "category", "title.keyword");
 
     private final EsClient es;
 
@@ -45,87 +50,122 @@ public class M52SortFielddata implements LevelModule {
 
     @Override
     public LevelResult run() throws Exception {
-        // @focus-start 三种排序目标：数值字段 / text 字段 / keyword 子字段
-        SortOutcome byPrice = trySort(Json.list(Json.map("price", "asc")));
-        SortOutcome byText = trySort(Json.list(Json.map("title", "asc")));
-        SortOutcome byKeyword = trySort(Json.list(Json.map("title.keyword", "asc")));
+        Map<String, String> types = fieldTypes();
+
+        // @focus-start 每个字段各做一次 sort 与一次 terms 聚合，成功记结果、失败记 root_cause
+        List<List<Object>> rows = new ArrayList<>();
+        Map<String, Object> detail = new LinkedHashMap<>();
+        int sortOk = 0;
+        int aggOk = 0;
+        int textCount = 0;
+        String textError = "";
+        for (String field : SORT_FIELDS) {
+            Outcome sort = trySort(field);
+            Outcome agg = tryAgg(field);
+            if (sort.ok()) sortOk++;
+            if (agg.ok()) aggOk++;
+            if ("text".equals(types.get(field))) textCount++;
+            if (!sort.ok() && textError.isEmpty()) textError = sort.error();
+            rows.add(TableData.row(
+                    field,
+                    types.getOrDefault(field, "—"),
+                    sort.ok() ? "✓ " + sort.summary() : "✗ 400",
+                    agg.ok() ? "✓ " + agg.summary() : "✗ 400",
+                    sort.ok() && agg.ok() ? "有 doc_values，可排序可聚合"
+                            : "只有倒排索引；改用 .keyword 或建 keyword 字段"));
+            detail.put(field, Json.map(
+                    "sort", sort.ok() ? sort.raw() : Json.map("error", sort.error()),
+                    "agg", agg.ok() ? agg.raw() : Json.map("error", agg.error())));
+        }
         // @focus-end
 
-        // 字段能力矩阵：从 mapping 直接读出每个字段有没有 doc_values
-        JsonNode mapping = es.get("/" + INDEX + "/_mapping");
-        JsonNode props = mapping.path(INDEX).path("mappings").path("properties");
-
-        List<List<Object>> rows = new ArrayList<>();
-        Iterator<Map.Entry<String, JsonNode>> fields = props.fields();
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> e = fields.next();
-            if (!MATRIX_FIELDS.contains(e.getKey())) continue;
-
-            JsonNode def = e.getValue();
-            String type = def.hasNonNull("type") ? def.get("type").asText() : "object";
-            boolean sortable = !"text".equals(type);
-            rows.add(TableData.row(
-                    e.getKey(),
-                    type,
-                    sortable ? "✓ 有 doc_values" : "✗ 只有倒排索引",
-                    sortable ? "可排序 / 可聚合" : "只能全文检索；需 .keyword 子字段"));
-        }
-
-        Map<String, Object> json = new LinkedHashMap<>();
-        if (!byPrice.ok()) json.put("priceError", byPrice.error());
-        if (!byText.ok()) json.put("textError", byText.error());
-        json.put("tops", byPrice.tops());
-
-        List<String> notes = new ArrayList<>();
-        if (!byText.ok()) notes.add("报错原文：" + byText.error());
-        notes.add("doc_values 是 Lucene 的列式存储（磁盘上的\"每列一个文件\"），排序、聚合、脚本访问都靠它；text 字段为了支持分词只建倒排索引，不建 doc_values。");
-        notes.add("不要为了排序去开 fielddata：它把词项加载进 JVM 堆，几十万文档就能吃掉几个 GB，且无法回收。正确做法是加 keyword 子字段。");
-        notes.add("数值/日期字段默认有 doc_values 且默认开启；keyword 也有。若确定某字段永不排序/聚合，可以 doc_values: false 省空间。");
-        notes.add("排序 + 分页组合还会带来\"深分页\"问题，下一模块专门讲。");
-
-        return LevelResult.builder(byText.ok()
-                        ? "text 字段排序居然成功了（不符合预期，请检查 mapping）"
-                        : "按 title（text）排序直接 400：Fielddata is disabled；改按 title.keyword 就正常——这就是\"排序/聚合要用 keyword\"的底层原因")
+        return LevelResult.builder("title / description 是 text：排序和聚合都被 400 拒绝（Fielddata is disabled）；"
+                        + "换成 title.keyword 与 price / category 就都成功 —— 卡住的不是「能不能读这个字段」，而是「有没有 doc_values」")
                 .metrics(
-                        new Metric("sort price", byPrice.ok() ? "✓ 成功" : "✗ 失败", num(byPrice.ms()) + "ms"),
-                        new Metric("sort title", byText.ok() ? "✓ 成功" : "✗ 400", num(byText.ms()) + "ms"),
-                        new Metric("sort title.keyword", byKeyword.ok() ? "✓ 成功" : "✗ 失败", num(byKeyword.ms()) + "ms"),
-                        new Metric("text 字段能否聚合", "不能（默认）", "开启 fielddata 会吃堆内存"))
-                .table(new TableData(List.of("字段", "类型", "列式存储", "能力"), rows))
-                .json(json)
-                .notes(notes)
+                        new Metric("text 字段", textCount + " 个", "sort 与聚合都会失败"),
+                        new Metric("可排序可聚合", (SORT_FIELDS.size() - textCount) + " 个", "keyword / 数值 / 日期"),
+                        new Metric("sort 成功数", sortOk + " / " + SORT_FIELDS.size(), "其余被 400 拒绝"),
+                        new Metric("terms 聚合成功数", aggOk + " / " + SORT_FIELDS.size(), "与排序同源：都要 doc_values"),
+                        new Metric("text 排序的报错", "400 Fielddata is disabled",
+                                textError.isEmpty() ? "本次未触发" : shorten(textError)))
+                .table(new TableData(List.of("字段", "类型", "sort", "terms 聚合", "原因"), rows))
+                .json(detail)
+                .notes(
+                        textError.isEmpty() ? "本关没有触发 fielddata 报错，请检查 mapping 是否被改过。"
+                                : "报错原文（截断）：" + shorten(textError),
+                        "doc_values 是 Lucene 的列式存储（磁盘上\"每列一个文件\"），排序、聚合、脚本访问都靠它；text 字段为了支持分词只建倒排索引，不建 doc_values。",
+                        "不要为了排序去开 fielddata：它把词项加载进 JVM 堆，几十万文档就能吃掉几个 GB，且无法回收。正确做法是加 keyword 子字段。",
+                        "数值/日期字段默认有 doc_values 且默认开启；keyword 也有。若确定某字段永不排序/聚合，可以 doc_values: false 省空间。",
+                        "排序 + 分页组合还会带来\"深分页\"问题，下一模块专门讲。")
                 .build();
     }
 
-    private SortOutcome trySort(List<Object> sort) {
+    private Map<String, String> fieldTypes() {
+        JsonNode mapping = es.get("/" + INDEX + "/_mapping");
+        JsonNode props = mapping.path(INDEX).path("mappings").path("properties");
+        Map<String, String> types = new LinkedHashMap<>();
+        props.fields().forEachRemaining(e -> {
+            String type = e.getValue().hasNonNull("type") ? e.getValue().get("type").asText() : "object";
+            types.put(e.getKey(), type);
+            e.getValue().path("fields").fields().forEachRemaining(s ->
+                    types.put(e.getKey() + "." + s.getKey(),
+                            s.getValue().hasNonNull("type") ? s.getValue().get("type").asText() : "?"));
+        });
+        return types;
+    }
+
+    private Outcome trySort(String field) {
         long t0 = System.nanoTime();
         try {
             JsonNode r = es.post("/" + INDEX + "/_search", Json.map(
                     "size", 3,
-                    "_source", Json.list("title", "price"),
-                    "sort", sort));
+                    "track_total_hits", false,
+                    "_source", Json.list("title"),
+                    "sort", Json.list(Json.map(field, "asc"))));
             double ms = Timing.round((System.nanoTime() - t0) / 1_000_000.0, 1);
-
             List<String> tops = new ArrayList<>();
             for (JsonNode h : r.path("hits").path("hits")) {
-                JsonNode src = h.path("_source");
-                tops.add(src.path("title").asText() + " ¥" + num(src.path("price").asDouble()));
+                tops.add(h.path("_source").path("title").asText());
             }
-            return new SortOutcome(true, ms, null, tops);
+            return new Outcome(true, "", String.join(" · ", tops), ms, r);
         } catch (EsException e) {
+            return new Outcome(false, message(e), "", 0, null);
+        }
+    }
+
+    private Outcome tryAgg(String field) {
+        long t0 = System.nanoTime();
+        try {
+            JsonNode r = es.post("/" + INDEX + "/_search", Json.map(
+                    "size", 0,
+                    "track_total_hits", false,
+                    "aggs", Json.map("t", Json.map("terms", Json.map("field", field, "size", 3)))));
             double ms = Timing.round((System.nanoTime() - t0) / 1_000_000.0, 1);
-            return new SortOutcome(false, ms, e.getMessage(), List.of());
+            List<String> buckets = new ArrayList<>();
+            for (JsonNode b : r.path("aggregations").path("t").path("buckets")) {
+                JsonNode key = b.path("key");
+                String text = key.isNumber()
+                        ? String.valueOf(Math.round(key.asDouble() * 100) / 100.0)
+                        : key.asText();
+                buckets.add(text + "=" + b.path("doc_count").asLong());
+            }
+            return new Outcome(true, "", String.join(" · ", buckets), ms, r);
+        } catch (EsException e) {
+            return new Outcome(false, message(e), "", 0, null);
         }
     }
 
-    /** 复刻 JS 数字的默认字符串形式：整数不带 ".0" */
-    private static String num(double v) {
-        if (!Double.isInfinite(v) && !Double.isNaN(v) && v == Math.rint(v)) {
-            return String.valueOf((long) v);
-        }
-        return String.valueOf(v);
+    private static String message(EsException e) {
+        String m = e.getMessage() == null ? "400" : e.getMessage();
+        int i = m.indexOf("Fielddata is disabled");
+        if (i >= 0) return m.substring(i, Math.min(m.length(), i + 160));
+        return shorten(m);
     }
 
-    private record SortOutcome(boolean ok, double ms, String error, List<String> tops) {
+    private static String shorten(String s) {
+        return s.length() <= 120 ? s : s.substring(0, 120) + "…";
+    }
+
+    private record Outcome(boolean ok, String error, String summary, double ms, JsonNode raw) {
     }
 }
