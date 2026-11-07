@@ -1551,10 +1551,10 @@
         {
           "id": "m2-1",
           "title": "同一句中文，三种分词器切出什么",
-          "objective": "同一句中文在三种分词器下的词项差异，以及它对召回的直接影响",
+          "objective": "看清三种分词器切出的词项差异（含 position），并验证错配在查询侧的真实后果",
           "hook": "中文没有空格，standard 分词器只能逐字切——等于放弃语义。",
           "predict": "「蓝牙耳机」在 standard 分词器下会被切成几个词项？",
-          "brief": "对「小米无线蓝牙耳机主动降噪长续航」这句话：standard 逐字切出 15 个单字，ik_smart 切出 8 个词，ik_max_word 切出 9 个——注意它并不总是更多，本句里甚至把「耳机主动」误切出了「机主」。这组实测本身就说明：分词没有「正确答案」，只有「对当前语料更合适的切法」。",
+          "brief": "对「小米无线蓝牙耳机主动降噪长续航」这句话：standard 逐字切出 15 个单字，ik_smart 切出 8 个词，ik_max_word 切出 9 个 —— 注意它并不总是更多，本句里把「耳机主动」多切出一个「机主」。更要紧的是查询侧：同一个「蓝牙耳机」，用 standard 查 v2 只命中 682 条、最高分 3.89，用 ik_smart 查命中 3,788 条、最高分 5.41。分词器错配的症状不是「多返回噪音」，而是「召回更少、分数更低」—— 因为索引里的词项是成词单元，单字词项根本对不上。",
           "deep": [
             {
               "type": "p",
@@ -1635,20 +1635,13 @@
           "pitfall": "换分词器不是「加个配置」：索引期分词器变了，历史数据必须 reindex，否则新旧文档词项体系不一致，同一个 query 会命中一部分、漏掉一部分。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "对同一句中文分别跑 standard / ik_smart / ik_max_word，并对比两种查询分词器在 20 万文档上的召回",
-              "kind": "level"
+              "desc": "对同一句中文跑 standard / ik_smart / ik_max_word，记录每个 token 的 position 与 offset"
             },
             {
-              "label": "换个句子自己试",
-              "desc": "改 text 字段为你的业务词，看三种分词结果",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_analyze",
-              "body": {
-                "analyzer": "ik_max_word",
-                "text": "索尼降噪耳机包邮"
-              }
+              "desc": "用同一查询串分别指定三种查询期分析器，记录命中数与最高分"
+            },
+            {
+              "desc": "读 v2 的 title mapping，确认索引期与查询期实际配的是哪两个分析器"
             }
           ],
           "probes": [
@@ -1660,8 +1653,8 @@
                 "analyzer": "standard",
                 "text": "小米无线蓝牙耳机主动降噪长续航"
               },
-              "watch": "切出来的 token 数量与形态：是词还是单字",
-              "expect": "15 个单字（小 / 米 / 无 / 线 / 蓝 / 牙 / 耳 / 机 …）。standard 基于 Unicode 文本分段，对中文没有词典，实际效果就是逐字切 —— 语义信息在这一步就丢了。"
+              "watch": "token 个数与每个 token 的长度",
+              "expect": "15 个单字（小/米/无/线/蓝/牙/耳/机/主/动/降/噪/长/续/航），position 逐字递增。"
             },
             {
               "task": "同一句话，改用 ik_smart",
@@ -1671,8 +1664,8 @@
                 "analyzer": "ik_smart",
                 "text": "小米无线蓝牙耳机主动降噪长续航"
               },
-              "watch": "词数、以及有没有把「长续航」切开",
-              "expect": "8 个词：小米 / 无线 / 蓝牙 / 耳机 / 主动 / 降噪 / 长 / 续航。ik_smart 做最粗粒度切分，索引小、精度高，适合查询期。"
+              "watch": "与上面相比少了哪些切分点",
+              "expect": "8 个词：小米/无线/蓝牙/耳机/主动/降噪/长/续航。词变长，词项变少。"
             },
             {
               "task": "同一句话，改用 ik_max_word",
@@ -1682,11 +1675,49 @@
                 "analyzer": "ik_max_word",
                 "text": "小米无线蓝牙耳机主动降噪长续航"
               },
-              "watch": "词数是否变多，以及有没有出现奇怪的切法",
-              "expect": "9 个词，注意多出了「机主」—— ik_max_word 穷举所有可成词的组合，把「耳机主动」切成了「耳机 / 机主 / 主动」。它不总是「更多」，也不总是「更对」，索引期用它换取召回的代价是词项更多、索引更大。"
+              "watch": "是否多出跨词边界的组合",
+              "expect": "9 个词，多出一个「机主」（耳机+主动的跨词组合）。这就是「词项多 → 召回高、索引大」的来源。"
+            },
+            {
+              "task": "用 standard 分析器查「蓝牙耳机」，看召回与分数",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 1,
+                "track_total_hits": true,
+                "query": {
+                  "match": {
+                    "title": {
+                      "query": "蓝牙耳机",
+                      "analyzer": "standard"
+                    }
+                  }
+                }
+              },
+              "watch": "hits.total 与首条 _score",
+              "expect": "682 条、最高分 3.89。索引里是「蓝牙」「耳机」，查询却切成四个单字，只能靠偶合命中。"
+            },
+            {
+              "task": "同一查询改回 ik_smart",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 1,
+                "track_total_hits": true,
+                "query": {
+                  "match": {
+                    "title": {
+                      "query": "蓝牙耳机",
+                      "analyzer": "ik_smart"
+                    }
+                  }
+                }
+              },
+              "watch": "与上一条的差距",
+              "expect": "3,788 条、最高分 5.41。词项对齐后召回与分数同时上升 —— 这是「配对了」的样子。"
             }
           ],
-          "takeaway": "分词器决定词项词典长什么样，而查询只能命中词典里已经存在的词项",
+          "takeaway": "长度不是重点，词项集合才是：standard 按字、ik 按词；错配的症状是召回更少、分数更低",
           "next": "m2-2",
           "prereq": {
             "cluster": true,
@@ -1702,10 +1733,10 @@
         {
           "id": "m2-2",
           "title": "索引期与查询期分词器不一致",
-          "objective": "索引期与查询期用不同分词器会发生什么",
+          "objective": "用两个只差分析器的索引验证错配后果，并分清「查询侧能原地改、索引侧只能重建」",
           "hook": "「明明有这条数据却搜不到」——先查 _analyze，两边词项对不上。",
           "predict": "索引用 ik_max_word、查询用 ik_smart，搜得到吗？",
-          "brief": "倒排索引里存的是索引期的分词结果。查询时如果用了另一套分词器，两边词项不在同一个「语言」里：要么完全失配（0 条），要么靠单字偶合命中一堆不相关结果。本关用同一条查询、只改 analyzer，命中数从 thousands 掉到另一个量级。",
+          "brief": "倒排索引里存的是索引期的分词结果。查询时若用另一套分词器，两边词项不在同一个「语言」里，结果就是搜不到。本关建两个只差分词器的索引（文档、查询、分片、刷新策略完全一致）：A 索引期 ik_max_word + 查询期 ik_smart 命中 43 条；B 索引期 standard（单字）+ 查询期 ik_smart 命中 0 条。然后对 B 做两件事：原地把 search_analyzer 改成 standard（200 acknowledged，命中回到 67 条）；想把索引期 analyzer 改成 ik_max_word（400，Cannot update parameter [analyzer]）。",
           "deep": [
             {
               "type": "p",
@@ -1768,51 +1799,51 @@
           "pitfall": "用 analyzer 参数排查会掩盖问题：它绕过了字段配置，看到的不是你线上真实用的分词器。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "同一查询分别用默认 search_analyzer 与强制 standard，对比命中数、最高分与 Top 结果",
-              "kind": "level"
+              "desc": "建两个只差 analyzer 的索引，各写 200 条同样的商品，跑同一个查询，对比命中与最高分"
             },
             {
-              "label": "用 field 参数复现真实分词",
-              "desc": "注意这里用 field 而不是 analyzer，才是线上真实生效的配置",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_analyze",
-              "body": {
-                "field": "title",
-                "text": "蓝牙耳机"
-              }
+              "desc": "用 field 参数读两边索引期的真实词项，再读查询期切出来的词项，确认交集为空"
+            },
+            {
+              "desc": "原地改 B 的 search_analyzer 再查一次；再尝试改索引期 analyzer，抓 400 原文"
             }
           ],
           "probes": [
             {
-              "task": "用 field 参数看 title 真实生效的分词结果",
+              "task": "看 v2 的 title 到底配了哪两个分析器",
+              "method": "GET",
+              "path": "/eslab-products-v2/_mapping",
+              "watch": "title.analyzer 与 title.search_analyzer",
+              "expect": "analyzer=ik_max_word、search_analyzer=ik_smart —— 索引期细、查询期粗，这是中文全文检索最常见的组合。"
+            },
+            {
+              "task": "用 field 参数看 title 索引期的真实词项",
               "method": "POST",
               "path": "/eslab-products-v2/_analyze",
               "body": {
                 "field": "title",
                 "text": "蓝牙耳机"
               },
-              "watch": "切出几个词；这是索引期还是查询期的切法",
-              "expect": "2 个词：蓝牙 / 耳机。用 field 参数时 ES 会套用该字段在 mapping 里的真实配置（这里 analyzer=ik_max_word、search_analyzer=ik_smart），这才是线上实际生效的分词。"
+              "watch": "切出来是词还是字",
+              "expect": "蓝牙 / 耳机。field 参数走的是该字段的索引期分析器，也就是倒排里实际存的东西。"
             },
             {
-              "task": "手工指定 analyzer=standard，切断同一句话",
+              "task": "手工指定 analyzer=standard 切断同一个串",
               "method": "POST",
               "path": "/eslab-products-v2/_analyze",
               "body": {
                 "analyzer": "standard",
                 "text": "蓝牙耳机"
               },
-              "watch": "和上一条的 token 差异",
-              "expect": "4 个单字：蓝 / 牙 / 耳 / 机。这就是「用 analyzer 参数排查」的陷阱：它绕过了字段配置，你看到的不是线上真实行为。排查搜不到时，永远用 field，不要用 analyzer。"
+              "watch": "与上一条的词项交集",
+              "expect": "蓝 / 牙 / 耳 / 机。与索引里的「蓝牙」「耳机」交集为空 —— 这就是「数据在库里却搜不到」的全部原因。"
             },
             {
-              "task": "在查询里强制把分词器换成 standard，看命中数怎么变",
+              "task": "在查询里强制 standard，看命中怎么变",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "size": 0,
+                "size": 1,
                 "track_total_hits": true,
                 "query": {
                   "match": {
@@ -1823,11 +1854,11 @@
                   }
                 }
               },
-              "watch": "命中数是否比默认查询暴涨，最高分是否被摊薄",
-              "expect": "命中数明显变大（单字「蓝」「牙」「耳」「机」各自命中一大批），相关性被稀释。索引期用词、查询期用字，两边不在同一个「语言」里 —— 这类「能查但查不准」比查不到更难发现。"
+              "watch": "hits.total 与默认查询的差距",
+              "expect": "682 条（默认 ik_smart 是 3,788 条），分数也从 5.41 掉到 3.89。"
             }
           ],
-          "takeaway": "analyzer 与 search_analyzer 不一致是可设计的（扩大召回），但配错方向会静默丢结果",
+          "takeaway": "查询侧分词器能原地改（search_analyzer 可更新），索引侧改不动（analyzer 400，只能重建 + reindex）",
           "next": "m2-3",
           "prereq": {
             "cluster": true,
@@ -1979,10 +2010,10 @@
         {
           "id": "m3-1",
           "title": "单条写入 vs 批量写入",
-          "objective": "量化单条写入与 bulk 写入的差距，并找出差距真正的来源",
+          "objective": "用多轮中位数量化单条与 bulk 的差距，并确认差距来自请求次数而不是写入能力",
           "hook": "500 条文档，500 次 HTTP 往返 vs 1 次——差距不在 ES 写得快不快。",
           "predict": "同样 2000 条，bulk 会比逐条快几倍？",
-          "brief": "单条写入每条都要一次完整往返（连接、序列化、协调、分片路由、应答）。_bulk 把 N 条打包成一次请求，NDJSON 格式（action 行 + source 行交替）。本关实测 500 条：单条约 1–2 秒，bulk 约 50–100ms，快十倍以上。生产批量建议 5–15MB/批。",
+          "brief": "同样 200 条文档、同一个索引定义（refresh_interval=-1）、同样的字段：一条条 PUT 要 200 次往返与 200 次 translog 提交，_bulk 只要 1 次。本关每侧跑 3 轮正式样本 + 1 轮预热，取中位数并给出样本区间：单条中位数约 3 秒、bulk 约 23ms，差两个数量级（多次实测 106×–172×）。倍数只在本机 localhost 与这个数据量下成立，但方向（请求数决定开销）与线上一致。",
           "deep": [
             {
               "type": "p",
@@ -2052,35 +2083,36 @@
           "pitfall": "只看 HTTP 200 就认为批量成功——被拒绝的条目藏在 items 数组里，status 429/400 不会让整个请求失败。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "写 500 条文档两次：一次逐条 POST，一次单次 _bulk，对比总耗时与 ms/文档",
-              "kind": "level"
+              "desc": "同样 200 条文档，逐条 PUT 与单次 _bulk 各跑 3 轮（另 1 轮预热），取中位数与样本区间"
+            },
+            {
+              "desc": "两侧都先删索引再建索引，重建不计入耗时；写完 refresh 后核对条数与失败条目"
             }
           ],
           "probes": [
             {
-              "task": "读 v2 的累计写入统计（条数与总耗时）",
-              "method": "GET",
-              "path": "/eslab-products-v2/_stats/indexing",
-              "watch": "index_total 与 index_time_in_millis 算出来的 ms/条",
-              "expect": "20 万条几百毫秒到几秒量级，ms/条 很小 —— 这是 _bulk 摊薄固定开销后的结果。把同样的条数逐条 POST，ms/条 会高一个数量级。"
-            },
-            {
-              "task": "读 v2 的 translog 与 refresh 配置",
+              "task": "读 v2 的 translog 与 refresh 设置",
               "method": "GET",
               "path": "/eslab-products-v2/_settings",
-              "watch": "translog.durability、refresh_interval",
-              "expect": "translog.durability=REQUEST（默认）、refresh_interval=1s。REQUEST 意味着每个写请求都要 fsync 一次 —— 这才是「单条写入慢」的真正原因，不是 ES 写得慢，是每次都在等磁盘确认。"
+              "watch": "index.refresh_interval 与 translog.durability",
+              "expect": "durability=request（默认）：每个写请求结束前都 fsync 一次 translog —— 这才是单条写入慢的主因，不是磁盘 IO 本身。"
             },
             {
               "task": "看 write 线程池的队列与拒绝计数",
               "method": "GET",
-              "path": "/_nodes/stats/thread_pool",
-              "watch": "thread_pool.write 的 queue、rejected、active",
-              "expect": "queue 通常为 0、rejected 为 0。批量导入时如果 queue 持续堆积、rejected 开始增长，就该减小单批体积或降低并发 —— 429 就是这么来的。"
+              "path": "/_cat/thread_pool/write?v&h=node_name,active,queue,rejected",
+              "watch": "queue 与 rejected 两列",
+              "expect": "正常情况下 rejected=0、queue 接近 0。批量过大时队列堆积、rejected 上涨，就是该降批量的信号。"
+            },
+            {
+              "task": "看主索引现在有多大",
+              "method": "GET",
+              "path": "/_cat/indices/eslab-products-v2?v&h=index,docs.count,segments.count,store.size",
+              "watch": "docs.count 与 segments.count",
+              "expect": "2 万条、段数是个位数。这个规模下逐条写要 200 次提交，而一次 bulk 只要 1 次 —— 规模越大，差距越明显。"
             }
           ],
-          "takeaway": "批量省的是网络往返与提交次数，不是磁盘 IO——所以批大小存在最优值",
+          "takeaway": "批量省的是往返与提交次数：200 次 fsync 变 1 次；倍数是本机的，方向是通用的",
           "next": "m3-2",
           "prereq": {
             "cluster": true,
@@ -2188,10 +2220,10 @@
         {
           "id": "m3-3",
           "title": "近实时：写入后为什么查不到",
-          "objective": "把「写完查不到」从玄学变成可量化的 1 秒窗口",
+          "objective": "把「写完查不到」量化成三条路径：默认、wait_for、强制刷新，各自记录可见延迟与请求成本",
           "hook": "写成功 ≠ 可搜索，中间隔着一个 refresh。",
           "predict": "写入后立刻 _search，命中数会增加吗？",
-          "brief": "文档写入先进内存 buffer 与 translog，refresh 时才生成新的可搜索段。默认 refresh_interval=1s，所以存在最多 1 秒的可见性窗口。本关实测：写入后立即查询返回 0 条，约 1 秒后才可见；用 `?refresh=wait_for` 可以让本次写入等到刷新完成再返回（请求变慢，但写完即可查）。",
+          "brief": "文档写入先进内存 buffer 与 translog，refresh 时才生成可搜索的段。本关对三条路径各记四个数：写入响应、立即查询条数、可见延迟、请求耗时。实测：默认路径写入约 16ms 返回但立即查询 0 条，约 0.9 秒后才可见；refresh=wait_for 让本次请求变成约 1.03 秒、返回即可查；refresh=true 只多几毫秒即可查，代价是每次写都落一个新段。再用 200 条 bulk 比三种策略的中位数（约 18 / 900 / 26ms），说明为什么批量导入不能每条都刷新。",
           "deep": [
             {
               "type": "p",
@@ -2263,9 +2295,13 @@
           "pitfall": "别把 refresh 当「保存按钮」：它影响的是可见性，不是持久性；把 refresh_interval 调到很小不会让数据更安全。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "写入后立即查询、轮询可见时间、再对比 refresh=wait_for；最后对比 200 条批量在两种 refresh 策略下的耗时",
-              "kind": "level"
+              "desc": "写一条固定 _id 文档（默认 refresh），立即查一次并按 20ms 轮询到可见，记下可见延迟"
+            },
+            {
+              "desc": "分别用 refresh=wait_for 与 refresh=true 再写两条，记录请求耗时与立即查询结果"
+            },
+            {
+              "desc": "200 条 bulk 在三种 refresh 策略下各跑 3 轮 + 1 轮预热，取中位数；结束删除索引（文档随之消失）"
             }
           ],
           "probes": [
@@ -2273,25 +2309,18 @@
               "task": "确认 v2 的 refresh_interval",
               "method": "GET",
               "path": "/eslab-products-v2/_settings",
-              "watch": "refresh_interval 是多少",
-              "expect": "1s。所以「写入成功」到「能被搜到」之间最多有 1 秒的窗口 —— 这不是 bug，是近实时的定义。"
+              "watch": "index.refresh_interval 的值",
+              "expect": "1s。这就是「写完到可查」最大 1 秒窗口的来源；设成 -1 表示只靠手动 refresh，导入场景才这么干。"
             },
             {
-              "task": "对比 refresh 与 flush 的累计次数",
+              "task": "看段落在哪些分片上、每段多少文档",
               "method": "GET",
-              "path": "/eslab-products-v2/_stats/refresh,flush",
-              "watch": "refresh.total 与 flush.total 差多少个数量级",
-              "expect": "refresh 次数远多于 flush（本项目实测 refresh 几十次、flush 个位数）。refresh 负责「可见」（每 1s 生成新段），flush 负责「持久」（translog 落盘并清空）。两个诉求、两套机制，别混。"
-            },
-            {
-              "task": "读段统计：段数与每段文档数",
-              "method": "GET",
-              "path": "/eslab-products-v2/_stats/segments",
-              "watch": "段总数，以及单段是否已经很大",
-              "expect": "段数不多但单段很大（导入时 refresh_interval=-1，几乎一次成型）。段越多，每次查询要打开的索引结构越多、filter cache 越碎 —— 但也不要一见段多就 force-merge，那会重写全部数据。"
+              "path": "/_cat/segments/eslab-products-v2?v&h=shard,segment,docs.count,size",
+              "watch": "段数量、每段的 docs.count 与 size",
+              "expect": "段数远小于刷新次数：每秒刷新会产生小段，后台 merge 持续把小的合成大的。段数只反映最近一段时间的刷新与合并，不是写入次数。"
             }
           ],
-          "takeaway": "refresh 决定可见性，flush 决定持久性，两个时间尺度不要混为一谈",
+          "takeaway": "refresh 决定可见性、flush 决定持久性；wait_for 只是把等待挪进请求，不会让刷新变快",
           "next": "m3-4",
           "prereq": {
             "cluster": true,

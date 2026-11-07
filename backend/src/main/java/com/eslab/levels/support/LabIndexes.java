@@ -75,6 +75,9 @@ public class LabIndexes {
     public static final String DEMO_AUTO = "eslab-demo-auto";
     /** m1-4：反面教材，属性平铺成字段直到撞上限 */
     public static final String DEMO_EXPLODE = "eslab-demo-explode";
+    /** m2-2：同一批文档、同一查询，只差索引期/查询期分词器的两个对照索引 */
+    public static final String ANALYZER_OK = "eslab-goods-analyzer-ok";
+    public static final String ANALYZER_BAD = "eslab-goods-analyzer-bad";
     /** m3-1：单条写 vs bulk 写的对照组 */
     public static final String DEMO_WRITE = "eslab-demo-write";
     /** m3-2：自动 _id 与业务 _id 的写入耗时对照 */
@@ -252,6 +255,12 @@ public class LabIndexes {
         index(DEMO_EXPLODE, "m1", "m1-4", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
                 Source.SELF, 900, this::demoExplodeDefinition, List.of(), true,
                 "运行期间存在：450 个属性会撑成 900+ 字段，演示完即删");
+        index(ANALYZER_OK, "m2", "m2-2", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
+                Source.SELF, 200, () -> analyzerLabDefinition("ik_max_word", "ik_smart"), List.of(), true,
+                "运行期间存在：索引期与查询期都是成词单元，查询能命中");
+        index(ANALYZER_BAD, "m2", "m2-2", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
+                Source.SELF, 200, () -> analyzerLabDefinition("standard", "ik_smart"), List.of(), true,
+                "运行期间存在：索引期按字、查询期按词，词项对不上；演示完即删");
         index(DEMO_WRITE, "m3", "m3-1", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
                 Source.SELF, 200, this::demoWriteDefinition, List.of(), true,
                 "运行期间存在：refresh=-1，单条写与 bulk 写各跑一遍");
@@ -488,6 +497,21 @@ public class LabIndexes {
                 "mappings", Json.map(
                         "dynamic", true,
                         "properties", Json.map("attrs", attrs)));
+    }
+
+    /** m2-2：两个索引只差分析器，文档与查询完全相同 */
+    public Map<String, Object> analyzerLabDefinition(String indexAnalyzer, String searchAnalyzer) {
+        return Json.map(
+                "settings", Json.map(
+                        "number_of_shards", 1,
+                        "number_of_replicas", 0,
+                        "refresh_interval", "1s"),
+                "mappings", Json.map(
+                        "properties", Json.map(
+                                "sku", Json.map("type", "keyword"),
+                                "title", Json.map("type", "text",
+                                        "analyzer", indexAnalyzer,
+                                        "search_analyzer", searchAnalyzer))));
     }
 
     /** m3-1：关掉刷新，让「单条 vs bulk」只差请求次数这一个变量 */
