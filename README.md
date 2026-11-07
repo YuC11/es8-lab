@@ -97,9 +97,15 @@ curl -s --noproxy '*' http://127.0.0.1:8787/api/health
 ```bash
 sh sh/stop.sh                  # 停后端与前端（不碰 Elasticsearch）
 sh sh/clean.sh                 # 预览会删什么，默认不删
-sh sh/clean.sh --yes           # 执行：eslab-* 索引 + var/ + logs/ + dist/target
+sh sh/clean.sh --yes           # 执行：eslab-* 索引 + 模板/pipeline + var/ + logs/ + dist/target
 sh sh/clean.sh --yes --build   # 只清构建产物
+sh sh/audit.sh                 # 核对「登记 vs 实际」：该删的删了没、有没有未登记对象
+sh sh/audit.sh --after-run     # 跑完一遍课程后再核对，一次性资源必须清零
 ```
+
+`audit.sh` 需要后端在跑（声明来自 `LabIndexes`）。它会检查四件事：活着的 `eslab-*` 索引是否都在册、
+「跑完即删 / 仅模拟」的是否真的不在、模板与 pipeline 是否都在册、`open_contexts` 是否为 0；
+发现不一致时退出码为 1。
 
 ### 改了什么，跑哪条命令
 

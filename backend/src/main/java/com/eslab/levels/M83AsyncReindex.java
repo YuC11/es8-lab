@@ -52,7 +52,7 @@ public class M83AsyncReindex implements LevelModule {
         lab.ensureByReindex(LabIndexes.V4);
 
         // @focus-start 分支一「正常」：每次从空索引开始，否则「已完成」会瞬间达成，看不到进度
-        // maxDocs 传 0 = 不设上限：max_docs 与 slices 同时给会让 ES 搬不满（实测 20000 条只搬 16667）
+        // maxDocs 传 0 = 不设上限：max_docs 与 slices 同时给会让 ES 搬不满（本机基线：2 万条只搬 16,667）
         lab.rebuild(LabIndexes.V5, idx -> 0);
         LabData.AsyncTask task = lab.reindexAsync(
                 LabIndexes.V4, LabIndexes.V5, 0, 4_000, 30_000, 2);
@@ -163,8 +163,10 @@ public class M83AsyncReindex implements LevelModule {
                         "超时不是错误，是需要处理的状态：到了自己的等待上限就调 _tasks/{id}/_cancel，"
                                 + "再看一眼取消前写进去多少 —— 生产中重建停不下来比失败更常见",
                         "slices 只在本机单节点做有限并行；真正的并行上限是分片数、磁盘与 CPU",
-                        "实测坑：max_docs 与 slices>1 同时给会搬不满 —— 2 万条配 slices=2 只搬 16,667，"
-                                + "slices=4 也是 16,667，slices=3 是 19,998。要精确条数就别传 max_docs，或把 slices 压到 1",
+                        // 这一条是历史实测记录，不是本轮响应：必须写清条件，否则换数据量后就是错的
+                        "本机基线（2 万条源、单节点，2026-11 记录）：max_docs 与 slices>1 同时给会搬不满 —— "
+                                + "slices=2 只搬 16,667，slices=4 也是 16,667，slices=3 是 19,998。"
+                                + "这组数字随源条数与分片数变化，不要当常数用；要精确条数就别传 max_docs，或把 slices 压到 1",
                         "限速只在教学里用；生产上通常不限速，靠 _tasks 监控进度、靠取消接口兜底")
                 .build();
     }

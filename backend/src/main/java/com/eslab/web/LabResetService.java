@@ -98,8 +98,63 @@ public class LabResetService {
         out.put("indices", rows);
         out.put("aliases", aliasRows);
         out.put("assets", assetRows);
+        out.put("resources", resourceRows());
         out.put("writing", gate.writing());
         return out;
+    }
+
+    /**
+     * 每关声明自己占用什么、谁负责收尾 —— 从注册表推导，不让关卡再手写一遍。
+     * 审计脚本按这份声明核对「跑完之后有没有留下不该留的东西」。
+     */
+    private Map<String, Object> resourceRows() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<String, LabIndexes.Resources> e : indexes.resourcesByLevel().entrySet()) {
+            LabIndexes.Resources r = e.getValue();
+            if (r.empty()) continue;
+            Map<String, Object> one = new LinkedHashMap<>();
+            List<Map<String, Object>> idx = new ArrayList<>();
+            for (LabIndexes.IndexSpec s : r.indices()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("name", s.name());
+                m.put("lifecycle", s.lifecycle().name());
+                m.put("targetDocs", s.targetDocs());
+                m.put("cleanup", cleanupOf(s.lifecycle()));
+                idx.add(m);
+            }
+            one.put("indices", idx);
+            one.put("aliases", r.aliases());
+            List<Map<String, Object>> as = new ArrayList<>();
+            for (LabIndexes.AssetSpec a : r.assets()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("type", a.type());
+                m.put("name", a.name());
+                m.put("cleanup", "由关卡自己管理（模板类在 finally 删、pipeline 保留）；clean.sh 与复位面板可按登记名清");
+                as.add(m);
+            }
+            one.put("assets", as);
+            List<Map<String, Object>> cs = new ArrayList<>();
+            for (LabIndexes.ContextSpec c : r.contexts()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("kind", c.kind());
+                m.put("note", c.note());
+                m.put("cleanup", "关卡显式关闭；审计要求 open_contexts = 0");
+                cs.add(m);
+            }
+            one.put("contexts", cs);
+            out.put(e.getKey(), one);
+        }
+        return out;
+    }
+
+    private static String cleanupOf(LabIndexes.Lifecycle lifecycle) {
+        return switch (lifecycle) {
+            case PERSISTENT -> "常驻；只在复位面板或 clean.sh 里清";
+            case RESET_ON_RUN, RECREATE_ON_RUN -> "每次运行前先删再建，重跑不累积";
+            case DROP_AFTER_RUN -> "关卡结束删除，异常路径也删";
+            case ROLLOVER -> "常驻，随 rollover 新增 -00000N";
+            case PLANNED -> "只模拟，永不创建";
+        };
     }
 
     // ── 复位 ────────────────────────────────────────────────

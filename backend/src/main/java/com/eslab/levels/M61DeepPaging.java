@@ -117,10 +117,10 @@ public class M61DeepPaging implements LevelModule {
         // 结论必须由本轮实测决定：这台机器上 2 万条 / 3 分片时，from=9000 与 from=0 的 took
         // 常常只差 1–3ms，落在 1ms 分辨率与缓存抖动里。写死「放大 N 倍」会在实测反序时自相矛盾。
         String verdict = amplified
-                ? "第 1 页 " + baseText + "ms，第 450 页（from=9000）" + num(last) + "ms，放大 "
+                ? "第 1 页 " + baseText + "ms，from=9000 那一页（第 451–470 条）" + num(last) + "ms，放大 "
                         + String.format(Locale.ROOT, "%.1f", ratio)
                         + " 倍——深翻页的成本不是\"多传了 20 条\"，而是每个分片多吐了 9000 条"
-                : "第 1 页 " + baseText + "ms，第 450 页（from=9000）" + num(last) + "ms，两者只差 "
+                : "第 1 页 " + baseText + "ms，from=9000 那一页（第 451–470 条）" + num(last) + "ms，两者只差 "
                         + num(Math.abs(last - base)) + "ms —— 落在 took 的 1ms 分辨率与缓存抖动里，"
                         + "本机 2 万条看不出明显放大；机制上每个分片仍要吐 from+size 条候选，数据量上去才会显现";
 

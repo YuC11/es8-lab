@@ -97,7 +97,9 @@ es_reachable() {
 clean_assets() {
   local assets=(
     "_index_template/eslab-goods-template"
-    "_ingest/pipeline/eslab-goods-enrich"
+    "_index_template/eslab-goods-template-hi"
+    "_ingest/pipeline/eslab-goods-ingest"
+    "_ingest/pipeline/eslab-goods-ingest-safe"
   )
   printf '  集群资产（模板 / 管道）：\n'
   local a code

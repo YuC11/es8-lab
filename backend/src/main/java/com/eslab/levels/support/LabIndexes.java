@@ -157,11 +157,30 @@ public class LabIndexes {
                             String chapter, String ownerLevel) {
     }
 
+    /**
+     * 用一次就要关掉的搜索上下文（scroll / PIT）。
+     *
+     * 它与 AssetSpec 的区别：没有名字可以 DELETE，只有「打开过多少次」，
+     * 所以既不进 assets（否则复位会去 _ingest/pipeline 路径删），也不该出现在索引面板里，
+     * 只作为「这一关声明自己会开什么、用完要关」的记录，由审计脚本核对 open_contexts。
+     */
+    public record ContextSpec(String kind, String levelId, String note) {
+    }
+
+    /** 一关占用的全部资源：审计脚本与关卡详情共用这一个视图 */
+    public record Resources(String levelId, List<IndexSpec> indices, List<String> aliases,
+                            List<AssetSpec> assets, List<ContextSpec> contexts) {
+        public boolean empty() {
+            return indices.isEmpty() && aliases.isEmpty() && assets.isEmpty() && contexts.isEmpty();
+        }
+    }
+
     private final DatasetService ds;
     private final ObjectMapper mapper;
     private final Map<String, IndexSpec> indices = new LinkedHashMap<>();
     private final Map<String, AliasSpec> aliases = new LinkedHashMap<>();
     private final Map<String, AssetSpec> assets = new LinkedHashMap<>();
+    private final List<ContextSpec> contexts = new ArrayList<>();
 
     public LabIndexes(DatasetService ds, ObjectMapper mapper) {
         this.ds = ds;
@@ -233,9 +252,10 @@ public class LabIndexes {
         index(DYN, "m11", "m11-2", Lifecycle.RESET_ON_RUN, ResetCost.FAST,
                 Source.SELF, DYN_DOCS, this::dynDefinition, List.of(), true,
                 "dynamic_templates：attrs 收成 1 个 flattened");
-        index(TPL, "m11", "m11-1", Lifecycle.PERSISTENT, ResetCost.FAST,
+        // m11-1 的模板产物：关卡在 finally 里删除，所以是「跑完即删」而不是常驻
+        index(TPL, "m11", "m11-1", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
                 Source.SELF, 0, this::templateIndexDefinition, List.of(), true,
-                "模板产物：空 body 建出来也能带 1 分片 / refresh 5s");
+                "模板产物：空 body 建出来也能带 1 分片 / refresh 5s，关卡结束删除");
         index(TPL_PLANNED, "m11", "m11-1", Lifecycle.PLANNED, ResetCost.FAST,
                 Source.SELF, 0, this::templateIndexDefinition, List.of(), true,
                 "只做 _simulate_index，永不创建");
@@ -293,8 +313,17 @@ public class LabIndexes {
         // L4 集群资产
         alias(ALIAS, V3, List.of(V3, V4, V6));
         alias(LIVE_ALIAS, LIVE_2, List.of(LIVE_1, LIVE_2));
+        // 名字必须与关卡里真正用的常量一致：之前登记的是 eslab-goods-enrich，
+        // 而 m11-3 实际创建的是 eslab-goods-ingest / -safe，导致复位与 clean.sh 都删不到真对象
         asset("template", "eslab-goods-template", "eslab-goods-tpl-*", "m11", "m11-1");
-        asset("pipeline", "eslab-goods-enrich", null, "m11", "m11-3");
+        asset("template", "eslab-goods-template-hi", "eslab-goods-tpl-*", "m11", "m11-1");
+        asset("pipeline", "eslab-goods-ingest", null, "m11", "m11-3");
+        asset("pipeline", "eslab-goods-ingest-safe", null, "m11", "m11-3");
+        // 搜索上下文不是索引实体，也不能用 _ingest 路径删除：单独登记，由关卡自己关，审计脚本核对归零
+        context("scroll", "m6-2", "逐页采样用的 scroll，用完必须 DELETE /_search/scroll");
+        context("pit", "m6-2", "同一 PIT 内三起点逐页采样，用完必须 DELETE /_pit");
+        context("scroll", "m6-4", "scroll 路线，用完必须关闭");
+        context("pit", "m6-4", "PIT + search_after 路线，用完必须关闭");
     }
 
     private void index(String name, String chapter, String owner, Lifecycle lifecycle,
@@ -311,6 +340,10 @@ public class LabIndexes {
 
     private void asset(String type, String name, String pattern, String chapter, String owner) {
         assets.put(name, new AssetSpec(type, name, pattern, chapter, owner));
+    }
+
+    private void context(String kind, String levelId, String note) {
+        contexts.add(new ContextSpec(kind, levelId, note));
     }
 
     // ── 索引定义 ─────────────────────────────────────────────
@@ -697,6 +730,47 @@ public class LabIndexes {
 
     public List<AssetSpec> assets() {
         return List.copyOf(assets.values());
+    }
+
+    public List<ContextSpec> contexts() {
+        return List.copyOf(contexts);
+    }
+
+    /**
+     * 一关占用的全部资源。别名按「该关的索引是否参与这个别名」推导，
+     * 不再要求关卡自己声明一遍 —— 声明与实现只留一处，才不会两边打架。
+     */
+    public Resources resourcesOf(String levelId) {
+        List<IndexSpec> owned = byOwner(levelId);
+        List<String> aliasNames = new ArrayList<>();
+        for (AliasSpec a : aliases.values()) {
+            for (IndexSpec s : owned) {
+                if (a.candidates().contains(s.name()) || a.name().equals(s.name())) {
+                    aliasNames.add(a.name());
+                    break;
+                }
+            }
+        }
+        List<AssetSpec> ownedAssets = new ArrayList<>();
+        for (AssetSpec a : assets.values()) {
+            if (a.ownerLevel().equals(levelId)) ownedAssets.add(a);
+        }
+        List<ContextSpec> ownedContexts = new ArrayList<>();
+        for (ContextSpec c : contexts) {
+            if (c.levelId().equals(levelId)) ownedContexts.add(c);
+        }
+        return new Resources(levelId, owned, aliasNames, ownedAssets, ownedContexts);
+    }
+
+    /** 全部关卡 → 资源的映射，供 /api/lab/indexes 一次性带走 */
+    public Map<String, Resources> resourcesByLevel() {
+        java.util.LinkedHashSet<String> levels = new java.util.LinkedHashSet<>();
+        for (IndexSpec s : indices.values()) levels.add(s.ownerLevel());
+        for (AssetSpec a : assets.values()) levels.add(a.ownerLevel());
+        for (ContextSpec c : contexts) levels.add(c.levelId());
+        Map<String, Resources> out = new LinkedHashMap<>();
+        for (String lv : levels) out.put(lv, resourcesOf(lv));
+        return out;
     }
 
     // ── 校验 ────────────────────────────────────────────────

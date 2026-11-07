@@ -8261,7 +8261,7 @@
             {
               "type": "code",
               "lang": "http",
-              "code": "PUT /_ingest/pipeline/eslab-goods-enrich\n{ \"processors\": [\n  { \"set\":    { \"field\": \"ingested_at\", \"value\": \"{{{_ingest.timestamp}}}\" } },\n  { \"rename\": { \"field\": \"old_sku\", \"target_field\": \"sku\" } },\n  { \"gsub\":   { \"field\": \"title\", \"pattern\": \"\\s+\", \"replacement\": \" \" } },\n  { \"script\": { \"source\": \"if (ctx.price != null) { ctx.price_with_tax = Math.round(ctx.price * 1.13 * 100) / 100.0; }\" } },\n  { \"remove\": { \"field\": \"internal_note\" } } ] }\n\nPUT /eslab-goods-ingest/_doc/INGEST-1?pipeline=eslab-goods-enrich&refresh=true\n{ \"old_sku\": \"SKU-INGEST-1\", \"title\": \"  蓝牙   耳机  \", \"price\": 899 }",
+              "code": "PUT /_ingest/pipeline/eslab-goods-ingest\n{ \"processors\": [\n  { \"set\":    { \"field\": \"ingested_at\", \"value\": \"{{{_ingest.timestamp}}}\" } },\n  { \"rename\": { \"field\": \"old_sku\", \"target_field\": \"sku\" } },\n  { \"gsub\":   { \"field\": \"title\", \"pattern\": \"\\s+\", \"replacement\": \" \" } },\n  { \"script\": { \"source\": \"if (ctx.price != null) { ctx.price_with_tax = Math.round(ctx.price * 1.13 * 100) / 100.0; }\" } },\n  { \"remove\": { \"field\": \"internal_note\" } } ] }\n\nPUT /eslab-goods-ingest/_doc/INGEST-1?pipeline=eslab-goods-ingest&refresh=true\n{ \"old_sku\": \"SKU-INGEST-1\", \"title\": \"  蓝牙   耳机  \", \"price\": 899 }",
               "caption": "写入时带 ?pipeline=，处理器在索引之前执行"
             },
             {
@@ -8434,10 +8434,11 @@
           "prereq": {
             "cluster": true,
             "indices": [],
-            "text": "本关自己建 pipeline 与 eslab-goods-ingest，只要求 ES 在线",
+            "text": "本关自己建 pipeline（eslab-goods-ingest / -safe）与索引 eslab-goods-ingest，只要求 ES 在线",
             "creates": [
               "eslab-goods-ingest",
-              "pipeline eslab-goods-enrich"
+              "pipeline eslab-goods-ingest",
+              "pipeline eslab-goods-ingest-safe"
             ]
           }
         }
