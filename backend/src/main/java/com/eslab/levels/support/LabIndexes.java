@@ -69,6 +69,8 @@ public class LabIndexes {
     // 之前它们散落在 5 个关卡类里，同一个「sku/title/price」字段表被抄了 3 遍。
     /** m0-2：空 body 建出来的「默认索引」，读完设置就删 —— 默认 1 分片 1 副本在单节点上必然 yellow */
     public static final String DEMO_DEFAULTS = "eslab-demo-defaults";
+    /** m0-4：批次大小对照与导入进度，跑完即删（要走 LabData，所以必须是 eslab-goods* 前缀） */
+    public static final String DEMO_BATCH = "eslab-goods-batchtest";
     /** m1-1：只给分片数、不给 mappings，字段类型全交给 ES 猜 */
     public static final String DEMO_AUTO = "eslab-demo-auto";
     /** m1-4：反面教材，属性平铺成字段直到撞上限 */
@@ -241,6 +243,9 @@ public class LabIndexes {
         index(DEMO_DEFAULTS, "m0", "m0-2", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
                 Source.SELF, 0, () -> Json.map(), List.of(), true,
                 "运行期间存在：空 body 建出的默认索引（1 分片 / 1 副本），读完设置即删");
+        index(DEMO_BATCH, "m0", "m0-4", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
+                Source.SELF, 0, this::batchLabDefinition, List.of(), true,
+                "运行期间存在：批次大小对照（每批 100 vs 1000）与导入进度，跑完即删");
         index(DEMO_AUTO, "m1", "m1-1", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
                 Source.SELF, 2, this::demoAutoDefinition, List.of(), true,
                 "运行期间存在，展示完字段类型就删；mappings 交给动态映射");
@@ -444,11 +449,45 @@ public class LabIndexes {
         return Json.map("settings", Json.map("number_of_shards", 1, "number_of_replicas", 0));
     }
 
+    /** m0-4：和主索引同构的五个字段，只用来量「每批多大」这一个变量 */
+    public Map<String, Object> batchLabDefinition() {
+        return Json.map(
+                "settings", Json.map(
+                        "number_of_shards", 1,
+                        "number_of_replicas", 0,
+                        "refresh_interval", "1s"),
+                "mappings", Json.map(
+                        "properties", Json.map(
+                                "sku", Json.map("type", "keyword"),
+                                "title", Json.map("type", "text", "analyzer", "ik_max_word"),
+                                "price", Json.map("type", "scaled_float", "scaling_factor", 100),
+                                "category", Json.map("type", "keyword"),
+                                "tags", Json.map("type", "keyword"))));
+    }
+
     /** m1-4：允许多态映射，属性名由写入方决定 */
     public Map<String, Object> demoExplodeDefinition() {
         return Json.map(
                 "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0),
                 "mappings", Json.map("dynamic", true));
+    }
+
+    /**
+     * m1-4 的「换一种收法」对照：属性全部塞进一个 object。
+     *
+     * indexable=false 时 object 设 enabled:false —— 字段还进 _source，但不解析、不建索引，
+     * 映射里只占 1 个名额。这是「字段爆炸」唯一不增字段的收法（代价是搜不到）。
+     */
+    public Map<String, Object> explodeObjectDefinition(boolean indexable) {
+        Map<String, Object> attrs = indexable
+                ? Json.map("type", "object", "dynamic", true)
+                : Json.map("type", "object", "enabled", false);
+        return Json.map(
+                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0,
+                        "refresh_interval", "1s"),
+                "mappings", Json.map(
+                        "dynamic", true,
+                        "properties", Json.map("attrs", attrs)));
     }
 
     /** m3-1：关掉刷新，让「单条 vs bulk」只差请求次数这一个变量 */

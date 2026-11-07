@@ -416,10 +416,10 @@
         {
           "id": "m0-4",
           "title": "把数据灌到 2 万条：bulk 与它的隐性成本",
-          "objective": "能说出 bulk 的两个关键参数（批大小、refresh_interval）以及它们各自的代价",
+          "objective": "说清 bulk 的两个参数各改变了什么：批大小改请求次数，refresh_interval 改段数与可见性",
           "hook": "一条一条写要 2 万次往返；bulk 把它压成 10 次。但真正的成本不在网络，在 refresh。",
           "predict": "同样写 2 万条，bulk 会比逐条写快几倍？",
-          "brief": "bulk 的请求体是 NDJSON：一行动作（index/create/update/delete），一行文档，交替排列。每批 2000 条是个经验值——批太大单请求容易超时，批太小网络往返占主导。更关键的是导入期把 refresh_interval 设成 -1：否则每 1 秒一次 refresh 都要生成新段并可能触发 merge，写入速度会被压到三分之一。导完再恢复 1s 并手动 _refresh 一次。",
+          "brief": "bulk 的请求体是 NDJSON：一行动作（index/create/update/delete），一行文档，交替排列。本关把「批量导入」拆成三层可核对的证据：① 每批进度——批号、累计条数、速率、失败条目（读 items[].status，不看 HTTP 200）；② 导入期 refresh_interval 从 1s 改成 -1、导完再恢复，段数前后各读一次；③ 批次大小对照——同样 1000 条，按每批 100 条要 10 次请求，按每批 1000 条只要 1 次。主索引已达 2 万条时跳过对 v1 的写入（幂等），但三层证据仍会在一次性索引上真跑一遍。",
           "deep": [
             {
               "type": "p",
@@ -489,35 +489,53 @@
           "pitfall": "把 20 万条塞进一个 bulk 请求：单请求体过大导致超时，客户端重试，于是同一批数据被写了两遍。正确的做法是固定批大小 + 幂等 _id。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "以每批 2000 条 bulk 写入直到 2 万条，记录速率、段数与体积",
-              "kind": "level"
+              "desc": "演示导入 6000 条、每批 2000 条，逐批记录累计条数、速率与失败条目；导入期 refresh=-1"
+            },
+            {
+              "desc": "导完恢复 refresh_interval=1s 并 refresh，读段数；主索引不足 2 万时同样按 2000/批补到 2 万"
+            },
+            {
+              "desc": "同一个一次性索引重建两次，同样 1000 条分别按每批 100 条与每批 1000 条写，比较请求数、耗时与段数"
             }
           ],
           "probes": [
             {
-              "task": "数一下 v1 现在有多少文档",
-              "method": "GET",
-              "path": "/eslab-products-v1/_count",
-              "watch": "count 是否达到 2 万",
-              "expect": "默认目标是 20000；若之前用 seed 快进过，可能是 200000"
+              "task": "数一下 v1 现在有多少文档（精确 total）",
+              "method": "POST",
+              "path": "/eslab-products-v1/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "match_all": {}
+                }
+              },
+              "watch": "hits.total.value 是不是 2 万上下",
+              "expect": "20000 上下（m0-3 写的那条样例会让它是 20001）。这是「导入完成」的唯一判据：响应里的 total，而不是脚本打印的成功。"
             },
             {
-              "task": "看段的分布：段数、被删除文档、索引体积",
+              "task": "看 v1 当前的 refresh_interval 到底是多少",
               "method": "GET",
-              "path": "/eslab-products-v1/_stats/segments",
-              "watch": "_all.primaries.segments 下的 count / memory_in_bytes / docs.count",
-              "expect": "段数通常在个位数到几十之间；导入刚结束时可能偏多，merge 后会下降"
+              "path": "/eslab-products-v1/_settings",
+              "watch": "index.refresh_interval 的值",
+              "expect": "1s。导入期间它会变成 -1（关掉自动刷新），导完再被 finally 恢复成 1s —— 如果看到 -1，说明上一次导入中途失败了。"
+            },
+            {
+              "task": "看段落在哪些分片上、每段多少文档",
+              "method": "GET",
+              "path": "/_cat/segments/eslab-products-v1?v&h=shard,segment,docs.count,size",
+              "watch": "段数量、每段的 docs.count 与 size",
+              "expect": "段数远小于文档数：refresh 每秒产生小段，后台 merge 持续把小的合成大的。v1 是 1 分片，所以所有段都在 shard 0 上。"
             },
             {
               "task": "一行看完索引的整体规模",
               "method": "GET",
               "path": "/_cat/indices/eslab-products-v1?v&h=index,docs.count,segments.count,store.size",
-              "watch": "docs.count、segments.count、store.size 三个数",
-              "expect": "2 万条动态映射数据大约是几十 MB 量级，具体取决于字段与分词"
+              "watch": "docs.count、segments.count、store.size 三列是否互相矛盾",
+              "expect": "docs.count 与 _count 一致；segments.count 远小于文档数；store.size 与 v2（显式 mapping）相比更大 —— 动态映射多存了冗余结构。"
             }
           ],
-          "takeaway": "批量写入省的是往返与提交次数；而 refresh 频率决定段的数量，进而决定查询要扫多少东西",
+          "takeaway": "批量写入省的是往返与提交次数；refresh 频率决定段数与查询成本；批次大小只改变请求数，不改写入总量",
           "next": "m1-1",
           "after": {
             "indices": [
@@ -546,10 +564,10 @@
         {
           "id": "m1-1",
           "title": "动态映射会把你的数据猜成什么",
-          "objective": "搞清「不设计 Mapping」到底会发生什么，以及为什么它一声不响",
+          "objective": "从真实 mapping 读出 ES 猜出的类型，并用同一字段上的 term / match / sort 验证「推断」与「用法」是两件事",
           "hook": "不写 Mapping 直接灌数据，是线上事故最常见的第一现场。",
           "predict": "sku 用 term 查一条真实存在的完整编号，会命中几条？",
-          "brief": "不声明 Mapping 时，ES 会为每个新字段自动推断类型：数字→float/long，字符串→text + keyword 子字段（默认 dynamic 策略下 text 也会带 keyword）。但推断只看「第一次见到的形态」：sku 这种业务主键会被建成 text，tags 会被建成 text，于是精确匹配和排序全部失效，而且不报错——只是静默返回 0 条。",
+          "brief": "不声明 Mapping 时，ES 会为每个新字段自动推断类型：字符串→text + keyword 子字段、带小数的数字→float、整数→long、能被识别的日期串→date。推断只看「第一次见到的形态」，而且之后不能改。本关写 2 条结构相近的文档（第 2 条把数字写成字符串、数组写成单值，还多出一个 promo 字段），逐字段读回 mapping，再在每个字段上跑一个探针：sku 上 term 0 条 / term.keyword 1 条、tags 上 term 0 条 / term.keyword 2 条、text 排序被 fielddata 拒绝、status 再写「未知」直接 400。",
           "deep": [
             {
               "type": "p",
@@ -643,9 +661,7 @@
           "pitfall": "term 查 text 返回 0 条不报错，是最难排查的静默失败：先怀疑数据没写进去，再怀疑分词器，最后才想到类型。排查口诀：先看 _mapping，再看 _analyze。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "后端会临时建一个全动态索引，写入 2 条商品，然后跑 4 个探针（term tags / term sku / match title / sort title），最后删掉临时索引",
-              "kind": "level"
+              "desc": "建全动态索引 → 写 2 条样例文档 → refresh → 逐字段读 mapping 并在每个字段上跑一个探针 → 删索引"
             }
           ],
           "probes": [
@@ -653,8 +669,8 @@
               "task": "看你在第 0 章建的 v1 里，sku、tags、price、status 被动态映射猜成了什么类型",
               "method": "GET",
               "path": "/eslab-products-v1/_field_caps?fields=sku,tags,price,status",
-              "watch": "sku 与 tags 是 text 还是 keyword；price 是 float 还是 scaled_float；status 是 long 还是 integer",
-              "expect": "sku=text、tags=text、price=float、status=long。sku 和 tags 被当成自然语言处理，存进去的是分词后的词项，这就是后面 term 查询静默返回 0 条的根源。"
+              "watch": "每个字段的 type 与 has_keyword_subfield 标记",
+              "expect": "sku / tags 是 text 且带 keyword 子字段；price 是 float；status 是 long。四个都不是「业务需要的类型」。"
             },
             {
               "task": "对 v1 的 sku 做 term 精确查询（SKU2026000003 是真实存在的完整编号）",
@@ -662,32 +678,66 @@
               "path": "/eslab-products-v1/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "query": {
                   "term": {
                     "sku": "SKU2026000003"
                   }
                 }
               },
-              "watch": "命中数是不是 0，同时 HTTP 状态仍然是 200",
-              "expect": "0 条，且没有报错。term 不分析查询串，直接去词项词典找「SKU2026000003」这个完整词项；而 text 字段里存的词项是 sku、2026000003 这类分词结果，整串根本不存在。"
+              "watch": "hits.total 是 0 还是 1",
+              "expect": "0 条。text 字段的词项是分词结果（sku / 0003），整串查不到 —— 而且不报错，只是静默返回 0。"
             },
             {
-              "task": "同一个值换成 match 再查一次，对比命中数为什么差这么多",
+              "task": "同一个编号改查 sku.keyword",
               "method": "POST",
               "path": "/eslab-products-v1/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "query": {
-                  "match": {
-                    "sku": "SKU2026000003"
+                  "term": {
+                    "sku.keyword": "SKU2026000003"
                   }
                 }
               },
-              "watch": "命中数从 0 变成多少",
-              "expect": "命中 1 条。match 会先用字段的分词器把查询串切成词项，正好对上索引里的词项 —— 所以「能查到」并不代表类型建对了，它只是碰巧走通了分词这条路。"
+              "watch": "hits.total 与上一条的差别",
+              "expect": "1 条。keyword 子字段存原始整串，这才是「业务主键」该走的路。同一条数据、同一条文档，两种写法两种结果。"
+            },
+            {
+              "task": "对 tags（text）做 term 查询",
+              "method": "POST",
+              "path": "/eslab-products-v1/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "term": {
+                    "tags": "新品"
+                  }
+                }
+              },
+              "watch": "hits.total 是否为 0",
+              "expect": "0 条。「新品」被标准分词器切成「新」「品」两个单字词项，整词不存在。"
+            },
+            {
+              "task": "同一个标签改查 tags.keyword",
+              "method": "POST",
+              "path": "/eslab-products-v1/_search",
+              "body": {
+                "size": 0,
+                "track_total_hits": true,
+                "query": {
+                  "term": {
+                    "tags.keyword": "新品"
+                  }
+                }
+              },
+              "watch": "hits.total 的量级",
+              "expect": "数千条。keyword 子字段里每个标签就是一个完整词项 —— 这才是标签过滤的正确写法。"
             }
           ],
-          "takeaway": "动态映射只保证「写得进去」，不保证「按你的方式查得出来」——而且它不会报错",
+          "takeaway": "动态映射只保证「写得进去」，不保证「按你的方式查得出来」；推断与用法是两件事，分别验证",
           "next": "m1-2",
           "prereq": {
             "cluster": true,
@@ -701,10 +751,10 @@
         {
           "id": "m1-2",
           "title": "显式 Mapping：逐字段做决策",
-          "objective": "从「这个字段怎么被查」反推出类型，并亲手把 v2 建出来",
+          "objective": "从「这个字段怎么被查」反推出类型与代价，并让 strict 把写错的字段变成 400",
           "hook": "类型不是「选个像的」，而是从「这个字段怎么被查」反推出来的。",
           "predict": "把 price 建成 scaled_float、tags 建成 keyword，v2 的体积会比 v1 大还是小？",
-          "brief": "本项目 v2 索引的每个字段都有明确理由：sku/category/brand/tags/seller_id → keyword（精确匹配与聚合）；title → text + keyword 双写；description → 纯 text；price → scaled_float（省空间且无浮点噪声）；stock/sales → integer；status → integer 枚举；created_at → date；rating → half_float；specs → object。动态映射出的 v1 与它形成完整对照：同一份数据，v1 88MB、v2 62.7MB。",
+          "brief": "本项目 v2 的每个字段都由访问需求反推：sku/category/brand/tags/seller_id → keyword（精确匹配与聚合）；title → text + keyword 双写；description → 纯 text；price → scaled_float；stock/sales/status → integer；created_at → date；rating → half_float；specs → object。每个选择都标了代价（空间、精度、写入 CPU）。本关还会真的写一条合法商品到 v2 再读回、删除（条数不变），并写一个未知字段抓 strict 的 400。",
           "deep": [
             {
               "type": "p",
@@ -810,17 +860,13 @@
           "pitfall": "改 Mapping 不能「原地改类型」：已存在字段的类型只能通过 reindex 到新索引来变更。所以第一版 Mapping 值得多花半小时。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "并排对比 v1（动态）与 v2（显式）的字段类型、分片数、副本数，并给出每个类型的选型理由",
-              "kind": "level"
+              "desc": "并排对比 v1（动态）与 v2（显式）的字段类型、分片数，逐字段给「访问需求 → 类型 → 代价」"
             },
             {
-              "label": "查看真实 mapping",
-              "desc": "直接拉 v2 的完整 mapping，对照页面上的表格",
-              "kind": "console",
-              "method": "GET",
-              "path": "/eslab-products-v2/_mapping",
-              "body": null
+              "desc": "写一条合法商品文档到 v2，读回 _source，再删除并核对条数回到原值"
+            },
+            {
+              "desc": "写一条带未知字段 color_size 的文档，抓 strict 的 400 与原文"
             }
           ],
           "probes": [
@@ -828,15 +874,15 @@
               "task": "拉 v1（全动态映射）的字段类型",
               "method": "GET",
               "path": "/eslab-products-v1/_field_caps?fields=sku,title,price,status,tags,created_at",
-              "watch": "哪些字段类型是「猜」出来的，哪些明显不适合业务访问方式",
-              "expect": "sku=text、tags=text、price=float、status=long、created_at=date。sku/tags 应该是 keyword，price 应该是 scaled_float —— 这三处错误会一路传导到查询、聚合、排序。"
+              "watch": "六个字段的类型与子字段",
+              "expect": "sku/title/tags 是 text + keyword；price 是 float；status 是 long；created_at 是 date —— 全是猜的。"
             },
             {
               "task": "拉 v2（显式 Mapping）的同一批字段类型",
               "method": "GET",
               "path": "/eslab-products-v2/_field_caps?fields=sku,title,price,status,tags,created_at",
-              "watch": "逐字段对比两边的类型差异",
-              "expect": "sku=keyword、price=scaled_float、status=integer、tags=keyword，title 同时有 text 与 keyword 两个视角。类型不是「选个像的」，而是从「这个字段怎么被查」反推出来的。"
+              "watch": "与上一条逐项对比",
+              "expect": "sku/tags → keyword；title → text + keyword；price → scaled_float；status → integer；created_at → date。同一份数据，两种设计。"
             },
             {
               "task": "在 v2 上跑一次价格区间查询",
@@ -848,17 +894,31 @@
                 "query": {
                   "range": {
                     "price": {
-                      "gte": 100,
-                      "lte": 200
+                      "gte": 500,
+                      "lt": 1000
                     }
                   }
                 }
               },
-              "watch": "命中数与 ES took",
-              "expect": "数万条。scaled_float 以整数存储，范围查询走 BKD 树剪枝；如果 price 是 text（动态映射猜错），这个查询会直接报错或返回 0 条。"
+              "watch": "hits.total 与 took",
+              "expect": "数千条。scaled_float 以 long 存储，范围查询走 BKD 树，比 float 少一半空间且没有浮点噪声。"
+            },
+            {
+              "task": "往 dynamic:strict 的 v2 写一条带未知字段的文档",
+              "method": "PUT",
+              "path": "/eslab-products-v2/_doc/__strict_probe__",
+              "body": {
+                "sku": "SKU-PROBE",
+                "title": "探测文档",
+                "price": 1,
+                "category": "数码影音",
+                "color_size": "黑/XL"
+              },
+              "watch": "返回 200 还是 400，报错里点名的字段是哪个",
+              "expect": "400 strict_dynamic_mapping_exception：mapping set to strict, dynamic introduction of [color_size] is not allowed。字段名打错不会悄悄多出一个字段，而是当场失败。"
             }
           ],
-          "takeaway": "类型不是选个像的：要分词用 text，要精确/排序/聚合用 keyword，要范围用数值或日期",
+          "takeaway": "类型由「怎么被查」和「花多少空间」共同决定；strict 把字段名写错从静默变成 400",
           "next": "m1-3",
           "prereq": {
             "cluster": true,
@@ -874,10 +934,10 @@
         {
           "id": "m1-3",
           "title": "text 与 keyword 的本质区别",
-          "objective": "分清 term/match 与 text/keyword 四条组合的边界",
+          "objective": "分清 term/match 与 text/keyword 四条组合的边界，包括排序与聚合为什么只认 keyword",
           "hook": "同一个字段值，text 存的是「词项」，keyword 存的是「原串」。",
           "predict": "term 查 title=\"蓝牙耳机\"，会命中还是 0 条？",
-          "brief": "text 在写入时被分析器切成词项，倒排索引记录「词项→文档」；keyword 原样存储，一个值就是一个词项。于是：match（会分析）能查 text，term（不分析）只能查 keyword；排序和聚合必须走 keyword 或数值。生产上的标准做法是 text + keyword 双写（本项目 title 就是这么建的），用空间换两种访问方式。",
+          "brief": "text 在写入时被分析器切成词项，倒排索引记录「词项→文档」；keyword 原样存储，一个值就是一个词项。于是：match（会分析）能查 text，term（不分析）只能查 keyword；排序与聚合要读 doc_values，而 text 默认没有。本关固定关键词「蓝牙耳机」，同一个字段的两种视角各跑一遍：match 命中数千条、term 命中 0 条；term 查 title.keyword 只认整串（换成关键词本身是 0 条）；sort/terms 打在 title 上被 fielddata 拒绝，打在 title.keyword 上成功 —— 失败的报错原文一并给出。数据是默认的 2 万条（seed 可到 20 万）。",
           "deep": [
             {
               "type": "p",
@@ -947,24 +1007,13 @@
           "pitfall": "match 打在 keyword 字段上不会报错，但也不会分词：查「蓝牙 耳机」（带空格）与「蓝牙耳机」结果完全不同。这类「能查但查不准」比「查不到」更难发现。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "在 20 万真实文档上对比 term(title) / match(title) / term(title.keyword) / term(tags) 四种查法的命中数",
-              "kind": "level"
+              "desc": "固定关键词「蓝牙耳机」，对 title（text）跑 match 与 term，对 title.keyword 跑整串 term 与子串 term"
             },
             {
-              "label": "自己在控制台验证",
-              "desc": "把 match 换成 term，观察命中数从 thousands 变成 0",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "size": 0,
-                "query": {
-                  "term": {
-                    "title": "蓝牙耳机"
-                  }
-                }
-              }
+              "desc": "对 title 做 sort 与 terms 聚合（预期被 fielddata 拒绝），再对 title.keyword 做同样两件事"
+            },
+            {
+              "desc": "对 tags（keyword 数组）做 term，确认多值字段每个值都是独立词项"
             }
           ],
           "probes": [
@@ -974,14 +1023,15 @@
               "path": "/eslab-products-v2/_search",
               "body": {
                 "size": 0,
+                "track_total_hits": true,
                 "query": {
                   "term": {
                     "title": "蓝牙耳机"
                   }
                 }
               },
-              "watch": "命中数是不是 0，以及有没有报错",
-              "expect": "0 条且 HTTP 200。title 用 ik_max_word 索引，倒排索引里是「蓝牙」「耳机」「蓝牙耳机」这类词项，没有「蓝牙耳机」整串这一项（某种程度上可能有，但多数文档不会）—— term 不分析，自然对不上。"
+              "watch": "hits.total 是多少",
+              "expect": "0 条。term 不分析查询串，直接找「蓝牙耳机」这个整词项，而词典里存的是分析后的「蓝牙」「耳机」。"
             },
             {
               "task": "同样的 title，改用 match 查询",
@@ -996,8 +1046,8 @@
                   }
                 }
               },
-              "watch": "命中数规模，以及最高分是否被计算",
-              "expect": "命中数万条。match 用 search_analyzer（这里是 ik_smart）把查询串切成「蓝牙」「耳机」，两个词项都能在倒排索引里找到，于是命中。这就是「text 用来搜、keyword 用来精确匹配」的分工。"
+              "watch": "hits.total 与上一条的差距",
+              "expect": "数千条。match 先用同一个分析器把查询串切成「蓝牙」「耳机」，再按词项匹配 —— 这才是全文检索的用法。"
             },
             {
               "task": "对 tags（keyword 数组）做 term 精确匹配",
@@ -1012,11 +1062,61 @@
                   }
                 }
               },
-              "watch": "命中数是否精确、是否需要分词",
-              "expect": "命中一批。tags 是 keyword，每个标签就是一个完整词项，「新品」整串直接命中，不需要分词。换成「新」就一条都查不到 —— 精确匹配的语义就是这么硬。"
+              "watch": "hits.total 的量级",
+              "expect": "数千条。tags 是 keyword，每个标签就是一个完整词项，多值字段按值展开。"
+            },
+            {
+              "task": "对 text 字段排序，看 doc_values 缺了什么",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 1,
+                "sort": [
+                  {
+                    "title": "asc"
+                  }
+                ]
+              },
+              "watch": "返回 200 还是 400，root_cause 说什么",
+              "expect": "400 search_phase_execution_exception，root_cause 是 illegal_argument_exception：Fielddata is disabled on [title]。text 没有 doc_values，要排序得用 title.keyword。"
+            },
+            {
+              "task": "对 text 字段做 terms 聚合",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "t": {
+                    "terms": {
+                      "field": "title"
+                    }
+                  }
+                }
+              },
+              "watch": "同样报错，还是返回了桶",
+              "expect": "同样被拒，原因相同：聚合要读 doc_values。开 fielddata:true 能「修好」，代价是把正排搬进堆内存，是 OOM 的经典来源。"
+            },
+            {
+              "task": "同一聚合改到 title.keyword 上",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "size": 0,
+                "aggs": {
+                  "t": {
+                    "terms": {
+                      "field": "title.keyword",
+                      "size": 3
+                    }
+                  }
+                }
+              },
+              "watch": "buckets 的 key 与 doc_count",
+              "expect": "正常返回 top-3 桶，key 是完整标题 —— 因为 keyword 有 doc_values，且存的是整串。"
             }
           ],
-          "takeaway": "term 不分析直接查词项，match 先分析再查词项；对 text 用 term 等于查一个不存在的词项",
+          "takeaway": "term 不分析直接查词项，match 先分析再查词项；排序与聚合只认 doc_values，text 默认没有",
           "next": "m1-4",
           "prereq": {
             "cluster": true,
@@ -1032,10 +1132,10 @@
         {
           "id": "m1-4",
           "title": "字段爆炸：动态映射最贵的失败模式",
-          "objective": "看清动态映射最贵的失败模式：字段数暴涨如何拖垮集群",
+          "objective": "区分「单文档字段数」与「索引字段数」，并对照三种收法的字段数与可搜索性",
           "hook": "上游把商品参数平铺成 attribute_1..attribute_450，mapping 就再也收不住了。",
           "predict": "写入上千个不同前缀的字段，cluster state 会变大还是变小？",
-          "brief": "每来一个新的属性键，动态映射就长一个字段。字段数增长带来三重代价：cluster state 膨胀（每次变更全集群广播）、索引结构与内存开销上升、最终撞上 index.mapping.total_fields.limit（默认 1000）导致写入失败。本关用 4 波写入把字段数推到 900（450 个属性 × 2，因为动态映射给每个字符串都加了 keyword 子字段），再写第 451 个属性撞上 1000 字段上限，最后演示 v2 的 dynamic: strict 如何当场拒绝未知字段。",
+          "brief": "每来一个新的属性键，动态映射就长一个字段；而每个字符串字段会生成 text + keyword 两个字段，所以字段数是属性数的 2 倍，上限（index.mapping.total_fields.limit，默认 1000）比想象中到得快。本关在同一关里对照三种收法：A 平铺 attribute_1..N（400 个属性就吃掉 800 个名额，再加 150 个新属性直接被拒）；B 用 object 包一层（字段数几乎不变 —— object 只是分组，不是压缩）；C 用 object + enabled:false（映射里只占 1 个字段，代价是这些属性连过滤都用不了，只能从 _source 取）。",
           "deep": [
             {
               "type": "p",
@@ -1105,40 +1205,39 @@
           "pitfall": "字段数上限是整个索引共享的，包括多字段（title.keyword 也算一个字段）；点了 450 个 attribute（约 900 个字段）之后再想加业务字段，会直接写不进去。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "后端分 4 波写入递增属性字段，记录每波的字段数/体积；然后对 v2 写入一个未知字段，观察 strict 报错",
-              "kind": "level"
+              "desc": "平铺写入 50 / 200 / 400 个属性，每波记录单文档字段数与索引字段数"
+            },
+            {
+              "desc": "再写一条带 150 个新属性的文档，抓 1000 字段上限的拒绝原文"
+            },
+            {
+              "desc": "重建索引，把 200 个属性塞进 attrs 对象，对比字段数；再改成 enabled:false，对比字段数与可搜索性"
             }
           ],
           "probes": [
             {
-              "task": "往 dynamic:strict 的 v2 写一条带未知字段的文档",
-              "method": "POST",
-              "path": "/eslab-products-v2/_doc",
-              "body": {
-                "sku": "SKU-PROBE",
-                "title": "探测文档",
-                "unknown_field_xyz": 1
-              },
-              "watch": "HTTP 状态码与错误类型：是拒绝写入，还是悄悄多出一个字段",
-              "expect": "400 strict_dynamic_mapping_exception。strict 让「字段名写错」当场暴露，而不是三个月后在聚合报表里发现数据不对。代价是新字段上线必须先改 mapping。"
-            },
-            {
               "task": "看 v1 的动态 mapping 里究竟长出了哪些字段",
               "method": "GET",
               "path": "/eslab-products-v1/_mapping",
-              "watch": "每个字符串字段是不是都多了一个 keyword 子字段（title.keyword 这种）",
-              "expect": "每个字符串字段都带一个 .keyword 子字段（ignore_above 256）。这就是「动态映射不是没建 keyword，而是建了一个你不知道的 .keyword」—— 也解释了为什么有人 term 查 title 成功、有人失败。"
+              "watch": "properties 下有几个顶层字段，srcs 里有多少子字段",
+              "expect": "字段表与业务字段基本一致：14 个顶层字段，specs 下还有 3 个子字段 —— 结构和「商品字段表」长得像，但类型全是猜的（sku 是 text、status 是 long）。"
             },
             {
               "task": "看 v2 的索引级设置（分片数与 dynamic 策略）",
               "method": "GET",
               "path": "/eslab-products-v2/_settings",
-              "watch": "number_of_shards、number_of_replicas、以及 mapping 层面的 dynamic 是否能在索引设置里看到",
-              "expect": "3 分片、0 副本。动态策略在 mapping 里（前一条探针能展开看到 dynamic:strict），索引设置里只能看到分片与 refresh 这类参数 —— 两处别混。"
+              "watch": "number_of_shards 与 dynamic 的值",
+              "expect": "3 分片、dynamic=strict。strict 是唯一能在写入时拦住未知字段的开关，代价是新字段必须先改 mapping。"
+            },
+            {
+              "task": "把 v1 与 v2 的体积放在一起看",
+              "method": "GET",
+              "path": "/_cat/indices/eslab-products-*?format=json&h=index,docs.count,store.size,segments.count",
+              "watch": "同一条数据的两个索引，store.size 差多少",
+              "expect": "v1 明显更大：动态映射给每个字符串都加了 keyword 子字段（多一份正排），却没有任何类型设计的收益。"
             }
           ],
-          "takeaway": "字段爆炸是动态映射的隐性账单，dynamic:strict 是唯一能在写入时拦住它的开关",
+          "takeaway": "字段数是属性数的 2 倍，上限来得比想象中快；object 只分组不压缩，enabled:false 才真省字段但搜不到",
           "next": "m1-5",
           "prereq": {
             "cluster": true,
