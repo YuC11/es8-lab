@@ -188,6 +188,20 @@ public final class Probe {
             return out;
         }
 
+        // ── ingest pipeline 模拟失败：处理器抛异常时 docs[0] 只有 error ──
+        // 不加这一支会掉进下面的 _mget 分支，显示成「命中 0 · 缺失 ?」，与事实相反
+        if (d.path("docs").isArray() && !d.path("docs").isEmpty() && d.path("docs").get(0).has("error")) {
+            JsonNode err = d.path("docs").get(0).path("error");
+            String type = err.path("type").asText("error");
+            String reason = err.path("root_cause").isArray() && !err.path("root_cause").isEmpty()
+                    ? err.path("root_cause").get(0).path("reason").asText("")
+                    : err.path("reason").asText("");
+            facts.add("模拟 " + d.path("docs").size() + " 条 · 第 1 条报错");
+            facts.add(type + (reason.isBlank() ? "" : "：" + truncate(reason, 110)));
+            out.put("errorType", type);
+            return out;
+        }
+
         // ── bulk 混合动作 ──
         if (d.path("items").isArray()) {
             Map<String, Integer> byAction = new LinkedHashMap<>();
@@ -517,6 +531,42 @@ public final class Probe {
         if (d.has("found")) {
             boolean found = d.get("found").asBoolean();
             facts.add(found ? "found=true：这个 _id 存在" : "found=false：这个 _id 不存在");
+            if (found) {
+                // 版本三元组是「读回文档」这类探针的主要目的，不摊出来就得展开原始响应找
+                if (d.hasNonNull("_version")) {
+                    facts.add("_version=" + d.path("_version").asLong()
+                            + " · _seq_no=" + d.path("_seq_no").asLong()
+                            + " · _primary_term=" + d.path("_primary_term").asLong());
+                }
+                JsonNode src = d.path("_source");
+                if (src.isObject() && src.size() > 0) {
+                    List<String> pairs = new ArrayList<>();
+                    java.util.Set<String> shown = new java.util.HashSet<>();
+                    // 先放主字段，避免 description 这类长文本把 stock 挤出去
+                    for (String f : TOP_FIELDS) {
+                        if (src.has(f) && src.get(f).isValueNode()) {
+                            pairs.add(f + "=" + truncate(src.get(f).asText(), 40));
+                            shown.add(f);
+                        }
+                    }
+                    int scalars = 0;
+                    Iterator<Map.Entry<String, JsonNode>> it = src.fields();
+                    while (it.hasNext()) {
+                        Map.Entry<String, JsonNode> e = it.next();
+                        if (!e.getValue().isValueNode()) continue;
+                        scalars++;
+                        String text = e.getValue().asText();
+                        // 长文本（description 之类）在这里只是噪音，留给原始响应
+                        if (shown.contains(e.getKey()) || text.length() > 40 || pairs.size() >= 8) continue;
+                        pairs.add(e.getKey() + "=" + text);
+                        shown.add(e.getKey());
+                    }
+                    if (!pairs.isEmpty()) facts.add(String.join(" · ", pairs));
+                    if (scalars > shown.size()) {
+                        facts.add("另有 " + (scalars - shown.size()) + " 个标量字段未展开（见原始响应）");
+                    }
+                }
+            }
             out.put("found", found);
         }
 
@@ -524,6 +574,12 @@ public final class Probe {
         if (d.hasNonNull("result")) {
             String suffix = d.hasNonNull("_id") ? " · _id=" + truncate(d.get("_id").asText(), 24) : "";
             facts.add(d.get("result").asText() + suffix);
+        }
+
+        // 空对象也是结论：比如模板删掉之后 _simulate_index 什么都不返回。
+        // 不给一句话，页面就只剩一片空白，看着像探针坏了。
+        if (facts.isEmpty() && d.isObject() && d.isEmpty()) {
+            facts.add("空响应 {}：请求成功，但没有任何可返回的内容");
         }
 
         return out;

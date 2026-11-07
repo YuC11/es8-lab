@@ -39,6 +39,8 @@ public class LabIndexes {
     public static final String V6 = "eslab-goods-v6";
     /** m9-6：同义词放在索引期的对照索引，用来比「索引期重灌 vs 查询期只切别名」 */
     public static final String SYN_IDX = "eslab-goods-syn-idx";
+    /** m11-2：同一份数组对象同时建 object 与 nested 两列，用来演示跨元素误命中 */
+    public static final String NESTED = "eslab-goods-nested";
     public static final String SEARCH = "eslab-goods-search";
     public static final String OPS = "eslab-goods-ops";
     /** M1-M6 核心操作小关卡的独立、可随时复位的数据集。 */
@@ -203,6 +205,9 @@ public class LabIndexes {
         index(OPS, "m10", "m10-1", Lifecycle.RESET_ON_RUN, ResetCost.MEDIUM,
                 Source.SELF, OPS_DOCS + 10, this::opsDefinition, List.of(), true,
                 "增量写入实验：2000 条商品 + 10 条固定 id 运营文档");
+        index(NESTED, "m11", "m11-2", Lifecycle.DROP_AFTER_RUN, ResetCost.FAST,
+                Source.SELF, 2, this::nestedDefinition, List.of(), true,
+                "运行期间存在：object 与 nested 两列同数据，演示跨元素误命中；跑完即删");
         index(CORE, "m1", "core", Lifecycle.RESET_ON_RUN, ResetCost.FAST,
                 Source.SELF, 30, this::coreDefinition, List.of(), true,
                 "M1-M6 十个操作型小关卡共用，30 条确定性样例");
@@ -378,6 +383,20 @@ public class LabIndexes {
         Map<String, Object> title = obj(properties(def).get("title"));
         title.put("analyzer", "goods_syn_index");
         return def;
+    }
+
+    /** m11-2：数组对象的两种建模方式并排 */
+    public Map<String, Object> nestedDefinition() {
+        return Json.map(
+                "settings", Json.map("number_of_shards", 1, "number_of_replicas", 0),
+                "mappings", Json.map("properties", Json.map(
+                        "sku", Json.map("type", "keyword"),
+                        "attrs_obj", Json.map("type", "object", "properties", Json.map(
+                                "color", Json.map("type", "keyword"),
+                                "material", Json.map("type", "keyword"))),
+                        "attrs_nested", Json.map("type", "nested", "properties", Json.map(
+                                "color", Json.map("type", "keyword"),
+                                "material", Json.map("type", "keyword"))))));
     }
 
     /** 相关性实验索引：多两个字段，一个给 bool_prefix 补全，一个给 completion 建议 */

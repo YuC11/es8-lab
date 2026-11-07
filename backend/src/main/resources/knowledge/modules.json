@@ -7377,10 +7377,10 @@
         {
           "id": "m10-1",
           "title": "部分更新：doc、script 与 noop",
-          "objective": "分清「合并字段」「读改写」「整条替换」三种写入",
+          "objective": "用四列状态（result / _version / _seq_no / _primary_term）看清 doc、script、noop 各改了什么",
           "hook": "同一个字段改三次，版本号涨了几次？",
           "predict": "写入一个和当前完全相同的值，ES 会怎么处理？",
-          "brief": "本关在同一条文档上依次做：`doc` 部分更新（stock 100→42）、`script` 读改写（再减 5）、写入相同的值、以及 upsert 一条不存在的文档。看 `_version` 与 `result` 怎么变 —— 第三次写相同值会返回 noop，版本不动。",
+          "brief": "同一条 ops-1 依次做：doc 改 stock=42、script 减 5、再写一次相同的 37、给 ops-99 做 upsert。**每一步之后都 GET 读回**，四列并排看：初始 version=1 / seq_no=2001；doc 之后 version=2 / seq_no 跳到 2010（同分片其他写入也在推进 seq_no）；script 之后 version=3 / seq_no=2011；再写相同的值返回 noop，version 与 seq_no **都没动**。收尾删掉自己 upsert 的 ops-99。",
           "deep": [
             {
               "type": "p",
@@ -7470,62 +7470,36 @@
           "pitfall": "用 `PUT /_doc/{id}` 做局部更新：没传的字段会被删掉，看起来像「字段莫名消失了」。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "复位 ops 索引，依次执行 doc / script / 同值 / upsert，记录每步的 result 与版本",
-              "kind": "level"
+              "desc": "doc / script / 相同值 / upsert 四步，每步后 GET 读回 version、seq_no、primary_term 与 stock"
             },
             {
-              "label": "自己改一次",
-              "desc": "把 stock 改成别的值，看 result 是 updated 还是 noop",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-ops/_update/ops-1",
-              "body": {
-                "doc": {
-                  "stock": 66
-                }
-              }
+              "desc": "最后删除 ops-99，确认本关不留自建文档"
             }
           ],
           "probes": [
             {
-              "task": "读完这一关的那条文档",
+              "task": "读回 ops-1 的版本三元组",
               "method": "GET",
               "path": "/eslab-goods-ops/_doc/ops-1",
-              "watch": "found 与 _source",
-              "expect": "found=true；stock=37、version=2 —— 说明 doc 与 script 都生效了。"
+              "watch": "_version / _seq_no / _primary_term 与 stock",
+              "expect": "version=3、stock=37；noop 之后 seq_no 停在最后一次真实写入的位置。"
             },
             {
-              "task": "确认没有被整条替换",
-              "method": "POST",
-              "path": "/eslab-goods-ops/_search",
-              "watch": "返回的字段是否齐全",
-              "expect": "sku、title、price 都还在。若只剩 stock，说明用了 PUT 而不是 _update。",
-              "body": {
-                "size": 1,
-                "_source": [
-                  "sku",
-                  "title",
-                  "stock",
-                  "version",
-                  "price"
-                ],
-                "query": {
-                  "term": {
-                    "sku": "OPS-1"
-                  }
-                }
-              }
-            },
-            {
-              "task": "确认 ops-1 还在（后续关卡会复位 ops，ops-99 可能已被清掉）",
+              "task": "确认 upsert 出来的文档已删",
               "method": "GET",
-              "path": "/eslab-goods-ops/_doc/ops-1",
-              "watch": "found 与 stock",
-              "expect": "found=true、stock=100。这是复位后的基线文档；upsert 出来的 ops-99 会被后续关卡的重建清掉，不适合做长期探针。"
+              "path": "/eslab-goods-ops/_doc/ops-99",
+              "watch": "返回 404 还是文档",
+              "expect": "404：本关自建自清，不留给下一次 resetOps 兜底。"
+            },
+            {
+              "task": "看 ops 索引的整体条数",
+              "method": "GET",
+              "path": "/_cat/indices/eslab-goods-ops?format=json&h=index,docs.count",
+              "watch": "docs.count",
+              "expect": "2010 条（2000 商品 + 10 条固定 id 运营文档）；本关 upsert 的 ops-99 已不在其中，所以不是 2011。"
             }
           ],
-          "takeaway": "doc 合并、script 读改写、PUT 整条替换；noop 说明 ES 检测到了「没有变化」",
+          "takeaway": "_version 是文档级、_seq_no 是分片级；noop 两者都不推进 —— 这就是乐观并发的凭据来源",
           "next": "m10-2",
           "prereq": {
             "cluster": true,
@@ -7539,10 +7513,10 @@
         {
           "id": "m10-2",
           "title": "并发写入：_seq_no 与 409",
-          "objective": "用 (seq_no, primary_term) 让并发写不互相覆盖",
+          "objective": "三种冲突处理各自的响应，以及并发自增为什么不丢更新",
           "hook": "两个运营同时改同一个商品库存，后提交的那个会悄悄覆盖前一个。",
           "predict": "用同一个旧版本号连续写两次，第二次会成功吗？",
-          "brief": "ES 没有悲观锁。它给每条文档一个 `_seq_no`：读的时候拿到 7，写回去时必须还带着 7，否则 409。本关先制造一次确定性的冲突，再用 4 线程 × 25 次并发自增验证「带 retry_on_conflict 不会丢更新」。",
+          "brief": "起点 _seq_no=2002、stock=100。带凭证写成功（seq_no → 2010）；用旧凭证再写 **409 version_conflict**；旧凭证 + retry_on_conflict 直接 **400**（两个参数互斥）；只给 retry_on_conflict 则成功（updated）。最后 100 次并发自增（4 线程 × 25）全部落地，库存从 100 精确涨到 202。线程数/每线程次数可用 -Deslab.m102.threads / -Deslab.m102.perThread 改。",
           "deep": [
             {
               "type": "p",
@@ -7624,60 +7598,46 @@
           "pitfall": "以为 retry_on_conflict 能修复「显式 if_seq_no 冲突」；或者用 _version 做并发控制（它是文档级的，不是分片级的）。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "复位索引 → 取凭证 → 带凭证更新 → 旧凭证重试两次 → 4 线程并发自增 100 次",
-              "kind": "level"
+              "desc": "读凭证 → 带凭证更新 → 旧凭证（409）→ 旧凭证+retry（400）→ 只给 retry（成功）"
             },
             {
-              "label": "自己制造一次冲突",
-              "desc": "先读 _seq_no，写一次，再用同一个值写一次",
-              "kind": "console",
-              "method": "POST",
-              "path": "/eslab-goods-ops/_update/ops-2?if_seq_no=1&if_primary_term=1",
-              "body": {
-                "doc": {
-                  "stock": 1
-                }
-              }
+              "desc": "并发自增，核对成功数、失败数与最终库存是否等于起点 + 成功数 + 2"
             }
           ],
           "probes": [
             {
-              "task": "并发之后的库存",
+              "task": "看并发后的最终库存",
               "method": "GET",
               "path": "/eslab-goods-ops/_doc/ops-2",
-              "watch": "found 与 stock",
-              "expect": "stock=201。比这个数小，说明有更新被覆盖了。"
+              "watch": "_source.stock 与 _seq_no",
+              "expect": "stock=202：起点 100 → 带凭证更新 101 → 「只给 retry」那步直接置为 102 → 100 次并发自增；_version 约 103、_seq_no 已到 2111（分片级序号，比 version 大得多）。"
             },
             {
-              "task": "分片级序号",
+              "task": "用旧凭证写一次（必失败）",
               "method": "POST",
-              "path": "/eslab-goods-ops/_search",
-              "watch": "stock 与 version",
-              "expect": "stock=201；version 只涨了 2 —— 脚本里手动 +1 的那两次，与 _seq_no 的涨幅完全不同。",
+              "path": "/eslab-goods-ops/_update/ops-2?if_seq_no=0&if_primary_term=1",
               "body": {
-                "size": 1,
-                "_source": [
-                  "sku",
-                  "stock",
-                  "version"
-                ],
-                "query": {
-                  "term": {
-                    "sku": "OPS-2"
-                  }
+                "doc": {
+                  "stock": 1
                 }
-              }
+              },
+              "watch": "状态码与错误类型",
+              "expect": "409 version_conflict_engine_exception：凭证不是最新版就会被拒。"
             },
             {
-              "task": "确认另两条没被牵连",
-              "method": "GET",
-              "path": "/eslab-goods-ops/_doc/ops-3",
-              "watch": "found 与 stock",
-              "expect": "stock=100，没有被并发实验影响。"
+              "task": "凭证 + retry 一起用",
+              "method": "POST",
+              "path": "/eslab-goods-ops/_update/ops-2?if_seq_no=0&if_primary_term=1&retry_on_conflict=3",
+              "body": {
+                "doc": {
+                  "stock": 1
+                }
+              },
+              "watch": "400 还是 409",
+              "expect": "400 action_request_validation_exception：两个参数互斥。"
             }
           ],
-          "takeaway": "并发控制用 (seq_no, primary_term)，冲突用 409 显式暴露；retry_on_conflict 只处理内部版本冲突",
+          "takeaway": "乐观并发靠 (seq_no, primary_term)；要重试就别带凭证，要严格就别开 retry",
           "next": "m10-3",
           "prereq": {
             "cluster": true,
@@ -8007,10 +7967,10 @@
         {
           "id": "m11-1",
           "title": "索引模板：把索引定义变成代码",
-          "objective": "让「新建索引」不再依赖复制粘贴和记忆",
+          "objective": "模板真的生成了索引配置，priority 决定谁赢，不匹配的索引名不套模板",
           "hook": "三个月后有人手工建了个索引，少配了 refresh_interval —— 没人会发现，直到写入延迟突然变高。",
           "predict": "把模板里的 refresh_interval 从 5s 改成 10s，已经建好的索引会跟着变吗？",
-          "brief": "索引模板 = 匹配规则（`index_patterns`）+ 优先级（`priority`）+ settings + mappings。本关写一个模板，用 `_simulate_index` 先看结果，再用空 body 建出索引 —— 它的 1 分片与 5s refresh 全部来自模板。然后把模板改成 10s，验证旧索引不受影响。",
+          "brief": "模板 refresh=5s、priority=200；两个索引（-2026 / -2027）都用空 body 建出来，读回都是 1 分片、refresh 5s。再叠一个同 pattern、priority=300、refresh=30s 的模板，_simulate 立刻变成 30s —— 高优先级覆盖。用不匹配 pattern 的索引名模拟，则完全没有模板生效。结束前把模板与两个索引都删掉。",
           "deep": [
             {
               "type": "p",
@@ -8094,43 +8054,36 @@
           "pitfall": "以为改了模板，已有索引会跟着变。模板只在创建时生效，已有索引该是什么还是什么。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "写模板 → 模拟 → 空 body 建索引 → 读回 settings → 改模板 → 再模拟对照",
-              "kind": "level"
+              "desc": "建模板 → 模拟 → 真的用空 body 建两个索引并读回 settings"
             },
             {
-              "label": "自己模拟一次",
-              "desc": "改一个字段再来一次，不产生任何副作用",
-              "kind": "console",
-              "method": "POST",
-              "path": "/_index_template/_simulate_index/eslab-goods-tpl-2029",
-              "body": {}
+              "desc": "叠加 priority 300 的模板看覆盖；用不匹配索引名做反例；最后清理模板与索引"
             }
           ],
           "probes": [
             {
-              "task": "模拟一个还没建的索引",
+              "task": "确认模板已被清掉",
+              "method": "GET",
+              "path": "/_cat/templates/eslab-goods-template*?format=json&h=name",
+              "watch": "返回几行",
+              "expect": "0 行：本关结束会删模板，避免全局状态影响其他实验。"
+            },
+            {
+              "task": "确认两个索引已被清掉",
+              "method": "GET",
+              "path": "/_cat/indices/eslab-goods-tpl-*?format=json&h=index",
+              "watch": "返回几行",
+              "expect": "0 行：模板与索引都由本关自己收尾。"
+            },
+            {
+              "task": "模拟一个匹配 pattern 的索引名",
               "method": "POST",
-              "path": "/_index_template/_simulate_index/eslab-goods-tpl-2030",
-              "watch": "template.settings.index 与字段数",
-              "expect": "能看到 refresh_interval 与分片数；此时索引并不存在，这就是「先看结果再落盘」。"
-            },
-            {
-              "task": "已建索引的实际设置",
-              "method": "GET",
-              "path": "/eslab-goods-tpl-2026/_settings",
-              "watch": "refresh_interval 与分片数",
-              "expect": "仍是 5s、1 分片 —— 模板后来改成 10s 也没有影响它。"
-            },
-            {
-              "task": "模板带来的字段",
-              "method": "GET",
-              "path": "/eslab-goods-tpl-2026/_mapping",
-              "watch": "字段数与类型",
-              "expect": "5 个字段，全部来自模板；建索引时 body 是空的。"
+              "path": "/_index_template/_simulate_index/eslab-goods-tpl-2028",
+              "watch": "template.settings 里有没有配置",
+              "expect": "body 是空的 {}——模板已删，没有任何定义能套到这个名字上。空响应本身就是结论：模板不存在时，新建索引不会带上任何配置。"
             }
           ],
-          "takeaway": "模板保证「新建的索引一定符合约定」；它不追溯修改已有索引，也不能替代 reindex",
+          "takeaway": "模板只在创建时求值；priority 只在多模板同 pattern 时生效；全局状态要自己收",
           "next": "m11-2",
           "prereq": {
             "cluster": true,
@@ -8145,10 +8098,10 @@
         {
           "id": "m11-2",
           "title": "dynamic_templates 与 flattened：给未知字段定规则",
-          "objective": "在「字段爆炸」与「一律拒收」之间找到第三条路",
+          "objective": "flattened 省字段数，object 会跨元素误命中，nested 才保证「同一元素」",
           "hook": "商品属性天生是半结构化的：这周加「降噪深度」，下周加「充电协议」。",
           "predict": "同样 24 个属性字段，裸 dynamic 会建出多少个子字段？",
-          "brief": "本关建两个索引做对照：一个裸 dynamic，一个带 `dynamic_templates`。写入同样 50 条、每条 24 个 `attrs.*` 字段。裸 dynamic 长出 24 个子字段（叶子 48 个），带模板的只留 1 个 `flattened` 字段。而查询反而更简单：不用记 `.keyword`。",
+          "brief": "同一份 24 属性数据：裸 dynamic 长出 24 个子字段（叶子 48），flattened 只有 1 个字段；查询侧 flattened 更简单（不用 .keyword）。跨元素反例用两条文档：`[{黑,皮革}]` 与 `[{黑,布},{白,皮革}]` —— object 上查「黑 + 皮革」命中 **2** 条（第二条是跨元素误命中），nested 上只有 **1** 条；而单条件「黑」两边都是 2 条。差别只在组合条件上暴露。",
           "deep": [
             {
               "type": "p",
@@ -8230,14 +8183,29 @@
           "pitfall": "用 `path_match: attrs.*` 配 flattened（会报解析错误）；或者以为 flattened 能做范围查询 —— 它只能等值匹配。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "建两个索引、各写 50 条 24 属性文档，对比 mapping 与三种 term 查询结果",
-              "kind": "level"
+              "desc": "dynamic_templates 的 flattened 与裸 dynamic 对照：字段数与三种 term 写法"
             },
             {
-              "label": "自己查一次属性",
-              "desc": "flattened 字段直接用子键名，不需要 .keyword",
-              "kind": "console",
+              "desc": "object vs nested 的组合条件反例（同一元素才满足）；实验索引跑完即删"
+            }
+          ],
+          "probes": [
+            {
+              "task": "对照索引长出了多少子字段",
+              "method": "GET",
+              "path": "/eslab-goods-dyn-ctrl/_mapping",
+              "watch": "properties.attrs.properties 的数量",
+              "expect": "attrs 下 24 个子字段，每个带 keyword 子字段（叶子 48）。摘要里的「26 个字段」是展开后的路径数 = 24 + sku + title，不是子字段数。"
+            },
+            {
+              "task": "flattened 索引的 attrs 类型",
+              "method": "GET",
+              "path": "/eslab-goods-dyn/_mapping",
+              "watch": "attrs.type",
+              "expect": "flattened：整棵对象压成一个字段，不能做范围查询与子字段排序。"
+            },
+            {
+              "task": "flattened 上直接 term",
               "method": "POST",
               "path": "/eslab-goods-dyn/_search",
               "body": {
@@ -8248,42 +8216,12 @@
                     "attrs.color": "黑色"
                   }
                 }
-              }
-            }
-          ],
-          "probes": [
-            {
-              "task": "带模板的 attrs 长什么样",
-              "method": "GET",
-              "path": "/eslab-goods-dyn/_mapping",
-              "watch": "attrs 的类型与子字段数",
-              "expect": "attrs 只有一个 type=flattened，没有 properties —— 24 个属性被压成一个字段。"
-            },
-            {
-              "task": "裸 dynamic 的 attrs",
-              "method": "GET",
-              "path": "/eslab-goods-dyn-ctrl/_mapping",
-              "watch": "attrs 下子字段数量",
-              "expect": "24 个子字段，每个都是 text + keyword，共 48 个叶子字段。"
-            },
-            {
-              "task": "同一个词在两种建模下的命中",
-              "method": "POST",
-              "path": "/eslab-goods-dyn-ctrl/_search",
+              },
               "watch": "命中数",
-              "expect": "0 条：打在 text 上不分词，静默不报错。加 .keyword 才能命中 10 条。",
-              "body": {
-                "size": 0,
-                "track_total_hits": true,
-                "query": {
-                  "term": {
-                    "attrs.color": "黑色"
-                  }
-                }
-              }
+              "expect": "10 条左右：字段名直接用，不用加 .keyword。"
             }
           ],
-          "takeaway": "未知字段的正确处理不是「拒收」也不是「任其生长」，而是用 dynamic_templates 给它一条确定的规则",
+          "takeaway": "flattened 省字段但丢能力；object 会跨元素误命中；只有 nested 能保证「同一元素同时满足」",
           "next": "m11-3",
           "prereq": {
             "cluster": true,
@@ -8298,10 +8236,10 @@
         {
           "id": "m11-3",
           "title": "ingest pipeline：写入前加工",
-          "objective": "把字段改名、补算、脱敏收成一份可测试的定义",
+          "objective": "逐处理器的中间态，加上缺字段、类型错误、on_failure 三条失败路径",
           "hook": "这些逻辑如果散在每个写入方，迟早有一个地方漏了。",
           "predict": "pipeline 里的 script 处理器和查询时的 script，成本一样吗？",
-          "brief": "本关定义一个 5 个处理器的 pipeline：补时间戳、`old_sku` 改名成 `sku`、清洗标题里的连续空格、按 1.13 算含税价、删掉内部备注。先用 `_simulate` 看处理后的文档，再带 `?pipeline=` 真正写入。",
+          "brief": "五个处理器：补时间戳 → 改名 → 清空白 → 算含税价 → 删内部字段，最终含税价 1015.87（899×1.13）。逐 processor 的中间态用「前缀 pipeline」拿到（前 N 个处理器拼一个临时 pipeline 再 simulate）。失败路径：缺 old_sku 时 **rename 默认就报错**（illegal_argument_exception），写 ignore_missing:true 才跳过；price 传字符串会让 script 抛 script_exception；挂上 on_failure 后文档仍入库并写入 ingest_failed=tax_calc。边界：price=0 会算出 0.0，price=null 则不生成该字段。",
           "deep": [
             {
               "type": "p",
@@ -8390,72 +8328,108 @@
           "pitfall": "把 pipeline 当成「写入时顺便查一下别的索引」的地方 —— ingest 处理器不擅长跨索引查询，真要做富化，应该在上游准备好数据。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "定义 pipeline → 内联模拟 → 按名模拟 → 带 pipeline 写入 → 读回文档逐字段对照",
-              "kind": "level"
+              "desc": "五个处理器跑一遍，读回落库结果；再用前缀 pipeline 打出每步的中间态"
             },
             {
-              "label": "自己模拟一次",
-              "desc": "改一个字段值再看处理后结果，不产生写入",
-              "kind": "console",
-              "method": "POST",
-              "path": "/_ingest/pipeline/eslab-goods-enrich/_simulate",
-              "body": {
-                "docs": [
-                  {
-                    "_source": {
-                      "old_sku": "X-1",
-                      "title": "  测试   文档 ",
-                      "price": 100
-                    }
-                  }
-                ]
-              }
+              "desc": "三条失败路径 + 两个边界值（0 / null），逐个 simulate 观察 doc 或 error"
             }
           ],
           "probes": [
             {
-              "task": "模拟一份新文档",
+              "task": "看落库后的文档",
+              "method": "GET",
+              "path": "/eslab-goods-ingest/_doc/INGEST-1",
+              "watch": "sku / title / price_with_tax / internal_note",
+              "expect": "sku 已改名、title 空白被压成单空格、price_with_tax≈1015.87、internal_note 已删。"
+            },
+            {
+              "task": "模拟缺 old_sku 的文档（默认配置）",
               "method": "POST",
-              "path": "/_ingest/pipeline/eslab-goods-enrich/_simulate",
-              "watch": "处理后字段列表与 price_with_tax",
-              "expect": "能看到 sku 出现、internal_note 消失、price_with_tax=226.0。",
+              "path": "/_ingest/pipeline/_simulate",
               "body": {
+                "pipeline": {
+                  "processors": [
+                    {
+                      "rename": {
+                        "field": "old_sku",
+                        "target_field": "sku"
+                      }
+                    }
+                  ]
+                },
                 "docs": [
                   {
                     "_source": {
-                      "old_sku": "X-2",
-                      "title": "  带   空格 ",
-                      "price": 200,
-                      "internal_note": "内部"
+                      "title": "x"
                     }
                   }
                 ]
-              }
+              },
+              "watch": "docs[0] 是 doc 还是 error",
+              "expect": "error：rename 默认 ignore_missing=false，缺字段直接失败。"
             },
             {
-              "task": "真正写入的那条文档",
-              "method": "GET",
-              "path": "/eslab-goods-ingest/_doc/INGEST-1",
-              "watch": "found 与字段",
-              "expect": "found=true；字段是处理后的版本，不是原始输入。"
-            },
-            {
-              "task": "对照价格换算",
+              "task": "同一个处理器加 ignore_missing:true",
               "method": "POST",
-              "path": "/eslab-goods-ingest/_search",
-              "watch": "两个价格字段",
-              "expect": "price=899、price_with_tax=1015.87，比例正好 1.13。",
+              "path": "/_ingest/pipeline/_simulate",
               "body": {
-                "size": 1,
-                "_source": [
-                  "price",
-                  "price_with_tax"
+                "pipeline": {
+                  "processors": [
+                    {
+                      "rename": {
+                        "field": "old_sku",
+                        "target_field": "sku",
+                        "ignore_missing": true
+                      }
+                    }
+                  ]
+                },
+                "docs": [
+                  {
+                    "_source": {
+                      "title": "x"
+                    }
+                  }
                 ]
-              }
+              },
+              "watch": "docs[0] 里还有没有 error",
+              "expect": "没有 error：字段不存在时静默跳过，文档继续往下走。"
+            },
+            {
+              "task": "price 是字符串 + on_failure",
+              "method": "POST",
+              "path": "/_ingest/pipeline/_simulate",
+              "body": {
+                "pipeline": {
+                  "processors": [
+                    {
+                      "script": {
+                        "source": "if (ctx.price != null) { ctx.price_with_tax = Math.round(ctx.price * 1.13 * 100) / 100.0; }",
+                        "on_failure": [
+                          {
+                            "set": {
+                              "field": "ingest_failed",
+                              "value": "tax_calc"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "docs": [
+                  {
+                    "_source": {
+                      "price": "899"
+                    }
+                  }
+                ]
+              },
+              "watch": "有没有 ingest_failed 标记",
+              "expect": "有 ingest_failed=tax_calc，且没有 price_with_tax —— 降级继续而不是整条丢弃。"
             }
           ],
-          "takeaway": "入库前的清洗与补算应当是一份可测试、可复用的 pipeline，而不是散在各写入方的代码",
+          "takeaway": "pipeline 的错误是「整条文档失败」；要部分成功就挂 on_failure；rename 默认不忽略缺字段",
           "next": "",
           "prereq": {
             "cluster": true,
