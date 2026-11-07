@@ -4670,10 +4670,10 @@
         {
           "id": "m6-1",
           "title": "from+size 的代价曲线",
-          "objective": "把深分页的代价画成曲线，理解 from+size 的上限从哪来",
+          "objective": "用「每片候选量」与「窗口上限」两条硬事实说明深分页的代价，而不是靠一条耗时曲线",
           "hook": "深翻页慢的不是「多返回 20 条」，而是每个分片多吐了 9000 条候选。",
           "predict": "from=10000 的查询，每个分片要返回多少条？",
-          "brief": "from+size 的语义是每个分片各取 from+size 条，协调节点归并后截取 [from, from+size)。本关实测 from=0/1000/5000/9000 四档的 took 中位数，并触发 index.max_result_window=10000 的上限报错。",
+          "brief": "from+size 的语义是「每个分片各取 from+size 条，协调节点归并后取 [from, from+size)」。所以 from=9000 时每片要吐 9020 条候选，是第 1 页（20 条）的 451 倍 —— 这一列是算出来的，不依赖任何测量。耗时另一列只作参考：本机 2 万条 / 3 分片下四档中位 1 / 1 / 3 / 4ms，够不上 1.5 倍就写「未测出」，不硬拟合曲线。另外把 total 的三态一次说清：省略（10000/gte）、显式 false（字段直接缺失）、true（20000/eq）。",
           "deep": [
             {
               "type": "p",
@@ -4712,56 +4712,94 @@
           "pitfall": "把 max_result_window 调到 100000 来「解决」深分页：内存与 GC 压力同比上升，高峰期直接拖垮协调节点。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "四档 from 各采 3 轮取中位数，输出放大倍数与上限报错",
-              "kind": "level"
+              "desc": "四档 from 各采 3 轮 took 中位（前置 from=0/9000 各预热一次），同时给出每片候选量 = from+size"
+            },
+            {
+              "desc": "9980+20 与 9990+20 一对边界请求；再对同一个深页请求跑 total 三态（省略 / false / true）"
             }
           ],
           "probes": [
             {
-              "task": "第一页：from=0，size=20",
-              "method": "POST",
-              "path": "/eslab-products-v2/_search",
-              "body": {
-                "from": 0,
-                "size": 20,
-                "query": {
-                  "match_all": {}
-                }
-              },
-              "watch": "took，以及 _shards.total 是几个分片",
-              "expect": "took 很小（个位数 ms），3 个分片各取 20 条候选，协调节点归并 60 条。"
-            },
-            {
-              "task": "深翻页：from=9000，size=20",
+              "task": "看深页请求的 total 与命中结构",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
                 "from": 9000,
                 "size": 20,
-                "query": {
-                  "match_all": {}
-                }
+                "track_total_hits": true,
+                "sort": [
+                  {
+                    "price": "asc"
+                  },
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku"
+                ]
               },
-              "watch": "took 相对第一页放大了多少倍",
-              "expect": "took 明显变大。每个分片要取 from+size=9020 条候选，3 个分片共 27,060 条参与归并排序 —— 成本随 from 线性上涨，和「多返回 20 条」没有关系。"
+              "watch": "命中数、took、hits[].sort",
+              "expect": "20,000 条 / eq；hits[].sort 里能读到这一页的排序值，也就是 search_after 的游标。"
             },
             {
-              "task": "越过上限：from=10000，size=20",
+              "task": "同一个请求不写 track_total_hits",
               "method": "POST",
               "path": "/eslab-products-v2/_search",
               "body": {
-                "from": 10000,
+                "from": 9000,
                 "size": 20,
-                "query": {
-                  "match_all": {}
-                }
+                "sort": [
+                  {
+                    "price": "asc"
+                  },
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku"
+                ]
               },
-              "watch": "报错里的参数名与默认值",
-              "expect": "400，Result window is too large ... index.max_result_window default 10000。调大它只是把崩溃点往后移，内存与 GC 压力同比上升；正确解法是 search_after / PIT。"
+              "watch": "total 的 value 与 relation",
+              "expect": "10000 / gte：被截断，只是下限。"
+            },
+            {
+              "task": "显式写 track_total_hits: false",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "from": 9000,
+                "size": 20,
+                "track_total_hits": false,
+                "sort": [
+                  {
+                    "price": "asc"
+                  },
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku"
+                ]
+              },
+              "watch": "响应里还有 hits.total 吗",
+              "expect": "字段直接消失（不是 0）—— 与「省略」不是一回事，这是本关最容易被忽略的差别。"
+            },
+            {
+              "task": "越界：from + size 超过 10000",
+              "method": "POST",
+              "path": "/eslab-products-v2/_search",
+              "body": {
+                "from": 9990,
+                "size": 20
+              },
+              "watch": "状态码与 root_cause",
+              "expect": "400 illegal_argument_exception：Result window is too large（10010 > 10000）。深到一定位置不是「变慢」，是「不可用」。"
             }
           ],
-          "takeaway": "from+size 的代价随页码线性增长，且每个分片都要返回 from+size 条再协调合并",
+          "takeaway": "候选量是确定的（每片 from+size），耗时不是；total 有三态，只有 true 才精确",
           "next": "m6-2",
           "prereq": {
             "cluster": true,
@@ -5619,10 +5657,10 @@
         {
           "id": "m8-1",
           "title": "别让应用直连索引名：别名是什么",
-          "objective": "用别名把「应用看到的索引」和「真实的物理索引」解耦",
+          "objective": "分清读别名与写别名：读目标可以是复数，写目标只能有一个",
           "hook": "改 Mapping 要停机，往往不是因为 ES 慢，是因为应用把索引名写死了。",
           "predict": "别名切换的那一瞬间，正在读的请求会不会看到「索引不存在」？",
-          "brief": "别名只是一层指向关系：应用写 `eslab-goods`，实际落到 `eslab-goods-v3`。它不复制数据、不占空间，查询时 ES 把别名展开成真实索引名。本关你会亲手建出 v3、把 2 万条数据搬过去，再把别名挂上，并看到「经别名」与「直连 v3」的命中数完全一致。",
+          "brief": "本关先归位 v3、再切 v4、最后复原，三段都由自己管，所以表格里的「归位前」永远是真实读到的值。然后额外挂一个临时别名同时指向 v3 与 v4：读它得到 40,000 条（两个索引合起来），写它却被拒 —— 多目标别名无法确定写哪个。这一列把「读多写一」从一句话变成两条响应。临时别名在 finally 里删掉，不会干扰后面的别名断言。",
           "deep": [
             {
               "type": "p",
@@ -5715,51 +5753,44 @@
           "pitfall": "把别名当成备份，或者以为切别名会重建数据。别名只是一行指向，旧索引里的数据一条都没动。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "建 v3、从 v2 搬 2 万条、挂上别名，读出别名现状与两种查法的命中数",
-              "kind": "level"
+              "desc": "归位 v3 → 切 v4 → 复原 v3，每步读回写目标与经别名查询条数"
             },
             {
-              "label": "自己读一次别名",
-              "desc": "在控制台看 `_cat/aliases`，确认写索引是哪一个",
-              "kind": "console",
-              "method": "GET",
-              "path": "/_cat/aliases/eslab-goods?format=json",
-              "body": null
+              "desc": "再挂一个读别名指向 v3+v4：读 40,000 条、写被拒；finally 删除该别名"
             }
           ],
           "probes": [
             {
-              "task": "看别名指向哪个索引",
+              "task": "看别名当前指向",
               "method": "GET",
               "path": "/_cat/aliases/eslab-goods?format=json&h=alias,index,is_write_index",
-              "watch": "alias / index / is_write_index 三列",
-              "expect": "应当只有一行：eslab-goods → eslab-goods-v3，写索引为 true。"
+              "watch": "有几行、哪一行 is_write_index=true",
+              "expect": "只有一行是写目标（is_write_index），说明写路径唯一；指向 v3 还是 v4 取决于之后跑过哪一关 —— 本关自己结束时固定在 v3，但再跑 m8-2 会把它切到 v4。这正是「别名是全局可变状态」的直接体现。"
             },
             {
-              "task": "经别名查总数",
+              "task": "经别名读一次",
               "method": "POST",
               "path": "/eslab-goods/_search",
-              "watch": "hits.total.value",
-              "expect": "20,000 条，与直连 v3 完全一致 —— 别名不改变命中文档集。",
               "body": {
                 "size": 0,
                 "track_total_hits": true
-              }
+              },
+              "watch": "命中数",
+              "expect": "20,000 条：读别名等于读它指向的那个索引。"
             },
             {
-              "task": "直连 v3 对照",
+              "task": "直连物理索引读一次",
               "method": "POST",
               "path": "/eslab-goods-v3/_search",
-              "watch": "hits.total.value",
-              "expect": "同样是 20,000。两个数不一致就说明别名指错了索引。",
               "body": {
                 "size": 0,
                 "track_total_hits": true
-              }
+              },
+              "watch": "与经别名读是否一致",
+              "expect": "同样 20,000 条 —— 说明别名不是副本，只是指向。"
             }
           ],
-          "takeaway": "别名是应用的稳定入口，物理索引是可替换的实现；切换是一次原子请求，不是停机窗口",
+          "takeaway": "别名不是副本：读它=读指向的索引（可以是多个），写它必须唯一（is_write_index=true）",
           "next": "m8-2",
           "prereq": {
             "cluster": true,
@@ -5779,10 +5810,10 @@
         {
           "id": "m8-2",
           "title": "零停机改 Mapping：reindex 与原子切换",
-          "objective": "在不停机的前提下完成一次 Mapping 变更",
+          "objective": "按「校验 → 抽样 → 切换 → 回滚」四步走完一次零停机改 Mapping",
           "hook": "Mapping 一旦建好就不能改 —— 连把一个 ignore_above 从 256 改成 128 都不行。",
           "predict": "新索引建好、数据搬完、别名还没切，这时的写入会落到哪？",
-          "brief": "这一关把上一关的别名用起来：新建 v4（多一个 `selling_point` 字段，并把 `title.keyword.ignore_above` 从 256 改成 128），从 v2 搬 2 万条，再用一次 `/_aliases` 把指针从 v3 换到 v4。切换前后经别名查询的命中数不变。",
+          "brief": "新 Mapping 只能写进新索引：v4 多一个 selling_point、ignore_above 从 256 改成 128（字段数 14 → 15）。真正上线要四步：① 条数校验（20,000 = 20,000 才允许切，不等就停）；② 抽样 3 条 _id 去 v4 _mget，逐条比对 title/price（3/3 一致）；③ 一次 /_aliases 完成 remove + add；④ 真的回滚一次再切回来，回滚后仍读到 20,000 条。只比条数会漏掉「条数对但内容错」，所以第 ② 步不能省。",
           "deep": [
             {
               "type": "p",
@@ -5868,47 +5899,56 @@
           "pitfall": "只建了新索引却忘了切别名 —— 数据搬完了，线上还是查旧索引，看起来「什么都没变」。另一种是把顺序做反：先切别名再 reindex，用户会搜到一个空索引。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "建 v4、搬数据、原子切换别名，并对 v3/v4 的 Mapping 做逐项对比",
-              "kind": "level"
+              "desc": "建 v4、读回字段差异；条数校验 + 抽样 3 条 _mget 比对"
             },
             {
-              "label": "看切换后的别名",
-              "desc": "确认写索引已经变成 v4",
-              "kind": "console",
-              "method": "GET",
-              "path": "/_cat/aliases/eslab-goods?format=json",
-              "body": null
+              "desc": "切换 v4 → 回滚 v3（验证仍可读）→ 再切 v4 作为结束状态"
             }
           ],
           "probes": [
             {
-              "task": "切换后经别名还能查到吗",
-              "method": "POST",
-              "path": "/eslab-goods/_search",
-              "watch": "hits.total.value",
-              "expect": "仍是 20,000。如果变成 0，说明别名指向了一个空索引 —— 这是最危险的一种「成功」。",
-              "body": {
-                "size": 0,
-                "track_total_hits": true
-              }
-            },
-            {
-              "task": "v4 的字段数",
+              "task": "对比新旧索引的字段数",
               "method": "GET",
               "path": "/eslab-goods-v4/_mapping",
-              "watch": "字段总数与 title 的类型",
-              "expect": "15 个字段，比 v3 多 selling_point；title 仍是 text + keyword 子字段。"
+              "watch": "properties 下有几个字段、有没有 selling_point",
+              "expect": "比 v3 多出 selling_point（顶层 properties 计数：v3 14 → v4 15；探针面板会把子字段也数进去，所以显示的数字更大）。新增字段无法原地加到旧索引。"
             },
             {
-              "task": "确认别名只剩一个目标",
+              "task": "对比旧索引的字段数（应为 14）",
+              "method": "GET",
+              "path": "/eslab-goods-v3/_mapping",
+              "watch": "properties 下有几个字段",
+              "expect": "比 v4 少一个 selling_point。参数变更（ignore_above 256→128）同样不能原地改，只能建新索引再搬。"
+            },
+            {
+              "task": "抽样：从旧索引取 3 条真实 _id",
+              "method": "POST",
+              "path": "/eslab-goods-v3/_search",
+              "body": {
+                "size": 3,
+                "sort": [
+                  {
+                    "sku": "asc"
+                  }
+                ],
+                "_source": [
+                  "sku",
+                  "title",
+                  "price"
+                ]
+              },
+              "watch": "返回的 3 个 _id 与 title/price",
+              "expect": "拿到 3 条真实 _id 与内容；把这 3 个 _id 传给 v4 的 _mget，逐条比对才是「搬对了」的证据（硬编码 id 会得到 found=false）。"
+            },
+            {
+              "task": "确认当前写目标",
               "method": "GET",
               "path": "/_cat/aliases/eslab-goods?format=json&h=alias,index,is_write_index",
-              "watch": "行数与写索引",
-              "expect": "只有 v4 一行。如果 v3 还挂在同一个别名上，读请求会同时打到两个索引，命中数会翻倍。"
+              "watch": "写目标指向哪个索引",
+              "expect": "本关结束停在 eslab-goods-v4；回滚那一步曾经切回 v3 并验证过可读。"
             }
           ],
-          "takeaway": "Mapping 变更 = 建新索引 + 搬数据 + 原子切别名；切换前必须校验目标索引的文档数",
+          "takeaway": "零停机四步：条数校验、抽样比对、原子切换、真回滚一次；只比条数会漏内容错",
           "next": "m8-3",
           "prereq": {
             "cluster": true,
@@ -6045,10 +6085,10 @@
         {
           "id": "m8-4",
           "title": "段合并与滚动索引：_forcemerge 与 _rollover",
-          "objective": "分清「合并段」与「滚一个新索引」这两件常被混为一谈的事",
+          "objective": "按分片看段数，验证 forcemerge 的幂等与 rollover 的写目标转移",
           "hook": "段越少查得越快，但把段合到 1 个，为什么段数还是 3？",
           "predict": "3 个分片的索引执行 `max_num_segments=1`，最终段数是多少？",
-          "brief": "本关做两件事：对 3 分片的 v3 执行 `_forcemerge`，看段数从 6 降到 3（每分片 1 段，不是总共 1 段；重复执行时已经是最小值，合并变成幂等操作）；再建一个带写别名的滚动索引，写入 5000 条后按 `max_docs=4000` 滚动，看写指针从 `-000001` 换到 `-000002`。",
+          "brief": "段数要按分片统计：v3 是 3 分片，forcemerge 后仍是 3 段（shard0=1 / shard1=1 / shard2=1），索引级汇总会把它读成「没合成」。为了看到真实下降，另一半在 live-000001 上做：先连写 10 条 refresh=true 造出 11 个碎段，再合并到 1 段。两次 forcemerge 的段数相同，证明它是幂等的。rollover 前后各拍一次写别名快照：写目标从 -000001 挪到 -000002，旧索引 is_write_index=false（只读）。",
           "deep": [
             {
               "type": "p",
@@ -6125,43 +6165,43 @@
           "pitfall": "以为 forcemerge 之后段数一定变成 1；或者重复执行 rollover 却不清理，索引一路滚到 -000009。本关每次运行都会先删掉 -000002 之后的索引，保证可重复。",
           "steps": [
             {
-              "label": "运行本关",
-              "desc": "对 v3 做段合并并前后对比，再建滚动索引、写入、rollover、验证写入落点",
-              "kind": "level"
+              "desc": "v3 按分片统计段数 → merge → 再 merge，三次都按分片列出"
             },
             {
-              "label": "查看滚动索引的别名",
-              "desc": "确认写索引已经是指向 -000002",
-              "kind": "console",
-              "method": "GET",
-              "path": "/_cat/aliases/eslab-goods-live?format=json",
-              "body": null
+              "desc": "live-000001 造 11 个碎段 → 合并到 1 段；rollover 前后快照写别名，并确认旧索引只读"
             }
           ],
           "probes": [
             {
-              "task": "合并后的段数",
+              "task": "按分片看 v3 的段",
               "method": "GET",
-              "path": "/_cat/indices/eslab-goods-v3?format=json&h=index,docs.count,segments.count",
-              "watch": "segments.count",
-              "expect": "3。若仍是 6 或更大，说明合并没生效（可能是执行后立刻读取，统计还没刷新）。"
+              "path": "/_cat/segments/eslab-goods-v3?format=json&h=shard,segment,docs.count",
+              "watch": "每个 shard 有几行",
+              "expect": "shard0/1/2 各 1 行 —— 每片 1 段。索引级汇总的「3 段」正是这么来的。"
             },
             {
-              "task": "滚动索引的写指针",
+              "task": "看 v3 的段统计",
+              "method": "GET",
+              "path": "/eslab-goods-v3/_stats/segments",
+              "watch": "_all.primaries.segments.count",
+              "expect": "3：三个分片各一段。max_num_segments=1 是「每分片 1 段」。"
+            },
+            {
+              "task": "看 rollover 后的写别名",
               "method": "GET",
               "path": "/_cat/aliases/eslab-goods-live?format=json&h=alias,index,is_write_index",
-              "watch": "写索引是哪一个",
-              "expect": "eslab-goods-live-000002 的 is_write_index 为 true；-000001 仍在别名下但只读。"
+              "watch": "两行的 is_write_index",
+              "expect": "-000002 是 true、-000001 是 false —— 旧的只能读，新写入进 -000002。"
             },
             {
-              "task": "新索引里那条验证文档",
+              "task": "看两个 live 索引的条数",
               "method": "GET",
-              "path": "/eslab-goods-live-000002/_count",
-              "watch": "count",
-              "expect": "1 条。它证明 rollover 之后写入确实落到了新索引。"
+              "path": "/_cat/indices/eslab-goods-live-*?format=json&h=index,docs.count",
+              "watch": "两边的 docs.count",
+              "expect": "-000001 是 rollover 前的量（5,000+），-000002 只有 rollover 后写的 1 条。"
             }
           ],
-          "takeaway": "forcemerge 的单位是「每分片」；rollover 只是换写索引，不迁移数据、不改变已有文档",
+          "takeaway": "段数按分片看；forcemerge 幂等；rollover 只挪写目标，旧索引变只读",
           "next": "m9-1",
           "prereq": {
             "cluster": true,
